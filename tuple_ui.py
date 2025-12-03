@@ -147,6 +147,12 @@ class TupleUI(QMainWindow):
         # Set up system tray icon
         self.setup_tray_icon()
 
+        # Set initial show/hide action text based on window visibility
+        if self.isVisible():
+            self.show_action.setText("Hide Window")
+        else:
+            self.show_action.setText("Show Window")
+
         # Initial state update
         self.update_state()
 
@@ -609,7 +615,7 @@ class TupleUI(QMainWindow):
         # Show startup notification
         self.tray_icon.showMessage(
             "Tuple UI",
-            "Running in system tray. Double-click icon to open window.",
+            "Running in tray. Left-click to mute, right-click for menu.",
             QSystemTrayIcon.MessageIcon.Information,
             3000
         )
