@@ -1,1 +1,5 @@
-PyQt6>=6.0.0
+# System packages (install via apt):
+# sudo apt install python3-pyqt6
+#
+# Or install via pip if system package not available:
+# PyQt6>=6.0.0

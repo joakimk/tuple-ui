@@ -2,85 +2,34 @@
 
 This is made using Claude with very little manual editing.
 
-A graphical user interface for the Tuple CLI using Python and PyQt6 (KDE Qt bindings).
+A lightweight system tray application for controlling [Tuple](https://tuple.app) (pair programming tool) with visual status indicators.
 
 ## Features
 
-The UI provides a tabbed interface for all Tuple CLI commands:
+**Visual status indicators** - The tray icon changes color to show your status:
+- Gray: Daemon off
+- Blue: Daemon on, no call
+- Green: In call, unmuted
+- Red with "M": In call, muted
+- Orange dot: Screen sharing
 
-- **Authentication**: Login, complete authentication, and logout
-- **Calls**: Join calls, start new calls, and end calls
-- **Controls**: Share/unshare screen and mute/unmute microphone
-- **Daemon**: Start/stop the daemon for accepting incoming calls
-- **Settings**: View and update Tuple settings
-
-All commands run asynchronously with output displayed in a dedicated console area.
-
-## Requirements
-
-- Python 3.7+
-- PyQt6
-- Tuple CLI installed and available in PATH
+**Quick controls:**
+- Left-click to toggle mute (when in call)
+- Right-click for menu (start/stop daemon, join/new/end call, mute, share screen)
+- Double-click to show/hide window
 
 ## Installation
 
-1. Install Python dependencies:
-
+**Debian/Ubuntu:**
 ```bash
-pip install -r requirements.txt
+sudo apt install python3-pyqt6
+python3 tuple_ui.py
 ```
 
-## Usage
-
-Run the application:
-
+**Other systems:**
 ```bash
-python tuple_ui.py
+pip3 install PyQt6
+python3 tuple_ui.py
 ```
 
-Or make it executable and run directly:
-
-```bash
-chmod +x tuple_ui.py
-./tuple_ui.py
-```
-
-## UI Overview
-
-The application is organized into tabs:
-
-1. **Authentication Tab**: Manage your Tuple login
-   - Start Login Process: Initiates browser-based authentication
-   - Complete Login: Enter the auth code from browser
-   - Logout: Sign out of Tuple
-
-2. **Calls Tab**: Manage your calls
-   - Join Call: Enter a call URL to join
-   - Start New Call: Create and join a new call with your personal URL
-   - End/Leave Call: Exit the current call
-
-3. **Controls Tab**: In-call controls
-   - Screen Sharing: Share or unshare your screen
-   - Microphone: Mute or unmute your mic
-
-4. **Daemon Tab**: Daemon management
-   - Start Daemon: Enable incoming calls
-   - Stop Daemon: Disable incoming calls
-   - Show Debug UI: Launch Tuple's debug interface
-
-5. **Settings Tab**: View and modify settings
-   - List All Settings: Display current configuration
-   - Update Setting: Change a specific setting value
-
-## Output Window
-
-The bottom panel shows command output in real-time, with errors highlighted in red. Use the "Clear Output" button to clear the console.
-
-## Notes
-
-- Commands run asynchronously to prevent UI freezing
-- Only one command can run at a time
-- The status bar shows the current operation
-- All Tuple CLI features are accessible through the UI
-# tuple-ui
-# tuple-ui
+Requires Tuple CLI installed and in PATH.
