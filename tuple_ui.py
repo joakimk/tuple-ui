@@ -9,10 +9,10 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QTextEdit, QLabel, QGroupBox, QMessageBox,
-    QFrame
+    QFrame, QSystemTrayIcon, QMenu
 )
-from PyQt6.QtCore import QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt
+from PyQt6.QtGui import QFont, QIcon, QAction, QCloseEvent
 
 
 class TupleState:
@@ -143,6 +143,9 @@ class TupleUI(QMainWindow):
         self.state_timer = QTimer()
         self.state_timer.timeout.connect(self.update_state)
         self.state_timer.start(2000)
+
+        # Set up system tray icon
+        self.setup_tray_icon()
 
         # Initial state update
         self.update_state()
@@ -405,6 +408,9 @@ class TupleUI(QMainWindow):
         # Rebuild action area based on state
         self.rebuild_actions()
 
+        # Update tray icon
+        self.update_tray_icon()
+
     def rebuild_actions(self):
         """Rebuild the action area to show only relevant buttons"""
         # Clear current layout
@@ -479,13 +485,295 @@ class TupleUI(QMainWindow):
             self.action_layout.addStretch()
             return
 
+    def create_tray_icon(self):
+        """Create a dynamic tray icon based on current state"""
+        from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen
+        from PyQt6.QtCore import Qt as QtCore
+
+        size = 64
+        pixmap = QPixmap(size, size)
+        pixmap.fill(QtCore.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Determine color and state based on current status
+        if not self.state.daemon_running:
+            # Gray: Daemon off
+            color = QColor(128, 128, 128)
+            text = ""
+        elif self.state.in_call:
+            if self.state.is_muted:
+                # Red: In call but muted
+                color = QColor(220, 50, 50)
+                text = "M"
+            else:
+                # Green: In call and unmuted
+                color = QColor(50, 200, 80)
+                text = ""
+        else:
+            # Blue: Daemon on but not in call
+            color = QColor(60, 140, 220)
+            text = ""
+
+        # Draw main circle
+        painter.setBrush(color)
+        painter.setPen(QPen(QColor(255, 255, 255, 180), 2))
+        painter.drawEllipse(8, 8, 48, 48)
+
+        # Add text overlay if needed (for mute indicator)
+        if text:
+            painter.setPen(QColor(255, 255, 255))
+            font = painter.font()
+            font.setPointSize(24)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(pixmap.rect(), QtCore.AlignmentFlag.AlignCenter, text)
+
+        # Add small indicator for screen sharing (orange dot in corner)
+        if self.state.is_sharing:
+            painter.setBrush(QColor(255, 140, 0))
+            painter.setPen(QPen(QColor(255, 255, 255), 2))
+            painter.drawEllipse(42, 42, 16, 16)
+
+        painter.end()
+
+        return QIcon(pixmap)
+
+    def setup_tray_icon(self):
+        """Set up system tray icon with menu"""
+        # Create tray icon
+        self.tray_icon = QSystemTrayIcon(self)
+
+        # Set initial icon
+        self.tray_icon.setIcon(self.create_tray_icon())
+
+        # Create tray menu
+        self.tray_menu = QMenu()
+
+        # Show/Hide window action
+        self.show_action = QAction("Show Window", self)
+        self.show_action.triggered.connect(self.toggle_window)
+        self.tray_menu.addAction(self.show_action)
+
+        self.tray_menu.addSeparator()
+
+        # Status section (will be updated dynamically)
+        self.status_action = QAction("Status: Unknown", self)
+        self.status_action.setEnabled(False)
+        self.tray_menu.addAction(self.status_action)
+
+        self.tray_menu.addSeparator()
+
+        # Quick actions
+        self.tray_daemon_action = QAction("Start Daemon", self)
+        self.tray_daemon_action.triggered.connect(self.tray_toggle_daemon)
+        self.tray_menu.addAction(self.tray_daemon_action)
+
+        self.tray_join_call_action = QAction("Join Call...", self)
+        self.tray_join_call_action.triggered.connect(self.tray_join_call)
+        self.tray_menu.addAction(self.tray_join_call_action)
+
+        self.tray_new_call_action = QAction("New Call", self)
+        self.tray_new_call_action.triggered.connect(lambda: self.run_command("tuple new"))
+        self.tray_menu.addAction(self.tray_new_call_action)
+
+        self.tray_end_call_action = QAction("End Call", self)
+        self.tray_end_call_action.triggered.connect(lambda: self.run_command("tuple end"))
+        self.tray_menu.addAction(self.tray_end_call_action)
+
+        self.tray_mute_action = QAction("Mute", self)
+        self.tray_mute_action.triggered.connect(self.tray_toggle_mute)
+        self.tray_menu.addAction(self.tray_mute_action)
+
+        self.tray_share_action = QAction("Share Screen", self)
+        self.tray_share_action.triggered.connect(self.tray_toggle_share)
+        self.tray_menu.addAction(self.tray_share_action)
+
+        self.tray_menu.addSeparator()
+
+        # Quit action
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(self.quit_application)
+        self.tray_menu.addAction(quit_action)
+
+        # Set the menu
+        self.tray_icon.setContextMenu(self.tray_menu)
+
+        # Connect double-click to show/hide window
+        self.tray_icon.activated.connect(self.tray_icon_activated)
+
+        # Show the tray icon
+        self.tray_icon.show()
+
+        # Show startup notification
+        self.tray_icon.showMessage(
+            "Tuple UI",
+            "Running in system tray. Double-click icon to open window.",
+            QSystemTrayIcon.MessageIcon.Information,
+            3000
+        )
+
+    def update_tray_icon(self):
+        """Update tray icon tooltip and menu based on current state"""
+        # Update the icon itself based on state
+        self.tray_icon.setIcon(self.create_tray_icon())
+
+        # Build status summary for tooltip
+        status_parts = []
+
+        if self.state.is_logged_in:
+            status_parts.append("Logged In")
+        else:
+            status_parts.append("Not Logged In")
+
+        if self.state.daemon_running:
+            status_parts.append("Daemon: ON")
+        else:
+            status_parts.append("Daemon: OFF")
+
+        if self.state.in_call:
+            status_parts.append("IN CALL")
+            if self.state.is_muted:
+                status_parts.append("(Muted)")
+            if self.state.is_sharing:
+                status_parts.append("(Sharing)")
+        else:
+            if self.state.signaler_state == "connected":
+                status_parts.append("Connected")
+            elif self.state.signaler_state in ["connecting", "synchronizing"]:
+                status_parts.append(self.state.signaler_state.title())
+
+        tooltip = "Tuple - " + " | ".join(status_parts)
+        self.tray_icon.setToolTip(tooltip)
+
+        # Update status action in menu
+        self.status_action.setText("Status: " + " | ".join(status_parts[:2]))
+
+        # Update daemon action
+        if self.state.daemon_running:
+            self.tray_daemon_action.setText("Stop Daemon")
+            self.tray_daemon_action.setEnabled(True)
+        else:
+            self.tray_daemon_action.setText("Start Daemon")
+            self.tray_daemon_action.setEnabled(True)
+
+        # Update call actions
+        if self.state.daemon_running and not self.state.in_call:
+            self.tray_join_call_action.setVisible(True)
+            self.tray_join_call_action.setEnabled(True)
+            self.tray_new_call_action.setVisible(True)
+            self.tray_new_call_action.setEnabled(True)
+            self.tray_end_call_action.setVisible(False)
+            self.tray_mute_action.setVisible(False)
+            self.tray_share_action.setVisible(False)
+        elif self.state.in_call:
+            self.tray_join_call_action.setVisible(False)
+            self.tray_new_call_action.setVisible(False)
+            self.tray_end_call_action.setVisible(True)
+            self.tray_end_call_action.setEnabled(True)
+
+            # Update mute action
+            self.tray_mute_action.setVisible(True)
+            self.tray_mute_action.setEnabled(True)
+            if self.state.is_muted:
+                self.tray_mute_action.setText("Unmute")
+            else:
+                self.tray_mute_action.setText("Mute")
+
+            # Update share action
+            self.tray_share_action.setVisible(True)
+            self.tray_share_action.setEnabled(True)
+            if self.state.is_sharing:
+                self.tray_share_action.setText("Unshare Screen")
+            else:
+                self.tray_share_action.setText("Share Screen")
+        else:
+            self.tray_join_call_action.setVisible(False)
+            self.tray_new_call_action.setVisible(False)
+            self.tray_end_call_action.setVisible(False)
+            self.tray_mute_action.setVisible(False)
+            self.tray_share_action.setVisible(False)
+
+    def tray_icon_activated(self, reason):
+        """Handle tray icon activation (clicks)"""
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.toggle_window()
+
+    def toggle_window(self):
+        """Show or hide the main window"""
+        if self.isVisible():
+            self.hide()
+            self.show_action.setText("Show Window")
+        else:
+            self.show()
+            self.activateWindow()
+            self.show_action.setText("Hide Window")
+
+    def tray_toggle_daemon(self):
+        """Toggle daemon from tray menu"""
+        if self.state.daemon_running:
+            self.run_command("tuple off")
+        else:
+            self.run_command("tuple on")
+
+    def tray_toggle_mute(self):
+        """Toggle mute from tray menu"""
+        if self.state.is_muted:
+            self.run_command("tuple unmute")
+        else:
+            self.run_command("tuple mute")
+
+    def tray_toggle_share(self):
+        """Toggle screen sharing from tray menu"""
+        if self.state.is_sharing:
+            self.run_command("tuple unshare")
+        else:
+            self.run_command("tuple share")
+
+    def tray_join_call(self):
+        """Show dialog to join a call from tray menu"""
+        from PyQt6.QtWidgets import QInputDialog
+
+        call_url, ok = QInputDialog.getText(
+            None,
+            "Join Call",
+            "Enter call URL:",
+            QLineEdit.EchoMode.Normal,
+            ""
+        )
+
+        if ok and call_url.strip():
+            self.run_command(f"tuple join {call_url.strip()}")
+
+    def closeEvent(self, event: QCloseEvent):
+        """Handle window close event - minimize to tray instead of quitting"""
+        if self.tray_icon.isVisible():
+            self.hide()
+            self.tray_icon.showMessage(
+                "Tuple UI",
+                "Application minimized to tray. Double-click to restore.",
+                QSystemTrayIcon.MessageIcon.Information,
+                2000
+            )
+            event.ignore()
+        else:
+            event.accept()
+
+    def quit_application(self):
+        """Actually quit the application"""
+        self.tray_icon.hide()
+        QApplication.quit()
+
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Tuple UI")
 
     window = TupleUI()
-    window.show()
+    # Don't show window on startup - start in tray only
+    # User can double-click tray icon to show window
+    # window.show()
 
     sys.exit(app.exec())
 
