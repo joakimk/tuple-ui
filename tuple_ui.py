@@ -6,6 +6,7 @@ Tuple UI - A graphical interface for the Tuple CLI
 import sys
 import subprocess
 from pathlib import Path
+from pynput import keyboard
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QTextEdit, QLabel, QGroupBox, QMessageBox,
@@ -146,6 +147,9 @@ class TupleUI(QMainWindow):
 
         # Set up system tray icon
         self.setup_tray_icon()
+
+        # Set up global hotkey for mute toggle
+        self.setup_global_hotkey()
 
         # Initial state update
         self.update_state()
@@ -763,7 +767,68 @@ class TupleUI(QMainWindow):
     def quit_application(self):
         """Actually quit the application"""
         self.tray_icon.hide()
+        # Stop the hotkey listener
+        if hasattr(self, 'hotkey_listener') and self.hotkey_listener:
+            self.hotkey_listener.stop()
         QApplication.quit()
+
+    def setup_global_hotkey(self):
+        """Set up global hotkey listener for mute toggle"""
+        # Track currently pressed keys
+        self.current_keys = set()
+
+        def on_press(key):
+            """Handle key press events"""
+            self.current_keys.add(key)
+
+            # Check for Ctrl+Shift+< or Ctrl+Shift+>
+            # These are typically: Ctrl+Shift+, (comma) and Ctrl+Shift+. (period)
+            ctrl_pressed = (keyboard.Key.ctrl_l in self.current_keys or
+                          keyboard.Key.ctrl_r in self.current_keys)
+            shift_pressed = (keyboard.Key.shift in self.current_keys or
+                           keyboard.Key.shift_l in self.current_keys or
+                           keyboard.Key.shift_r in self.current_keys)
+
+            try:
+                # Check if the pressed key is comma or period (< or > with shift)
+                key_char = key.char if hasattr(key, 'char') else None
+                if ctrl_pressed and shift_pressed and key_char in [',', '.', '<', '>']:
+                    # Toggle mute
+                    self.hotkey_mute_toggle()
+            except AttributeError:
+                pass
+
+        def on_release(key):
+            """Handle key release events"""
+            try:
+                self.current_keys.discard(key)
+            except KeyError:
+                pass
+
+        # Start the listener in a separate thread
+        self.hotkey_listener = keyboard.Listener(
+            on_press=on_press,
+            on_release=on_release
+        )
+        self.hotkey_listener.start()
+
+    def hotkey_mute_toggle(self):
+        """Toggle mute via global hotkey"""
+        # Only allow toggle if in a call
+        if not self.state.in_call:
+            self.tray_icon.showMessage(
+                "Tuple UI",
+                "Not in a call - cannot toggle mute",
+                QSystemTrayIcon.MessageIcon.Warning,
+                2000
+            )
+            return
+
+        # Toggle mute (no notification - status is visible in tray icon)
+        if self.state.is_muted:
+            self.run_command("tuple unmute")
+        else:
+            self.run_command("tuple mute")
 
 
 def main():
