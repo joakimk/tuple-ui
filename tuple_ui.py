@@ -697,7 +697,18 @@ class TupleUI(QMainWindow):
 
     def tray_icon_activated(self, reason):
         """Handle tray icon activation (clicks)"""
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            # Left click - toggle mute if in a call
+            if self.state.in_call:
+                self.tray_toggle_mute()
+            else:
+                self.tray_icon.showMessage(
+                    "Tuple UI",
+                    "Not in a call - cannot toggle mute",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    2000
+                )
+        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.toggle_window()
 
     def toggle_window(self):
