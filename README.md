@@ -1,5 +1,7 @@
 # Tuple UI
 
+This is made using Claude with very little manual editing.
+
 A graphical user interface for the Tuple CLI using Python and PyQt6 (KDE Qt bindings).
 
 ## Features
