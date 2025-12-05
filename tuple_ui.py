@@ -41,6 +41,7 @@ class TupleState:
             self.in_call = False
             daemon_started = False
             daemon_stopped = False
+            daemon_quitting = False
 
             for line in lines:
                 # Check for auth token
@@ -53,6 +54,10 @@ class TupleState:
                 if "daemon loop started" in line:
                     daemon_started = True
                     daemon_stopped = False
+                    daemon_quitting = False
+                elif "received 'off' message, quitting" in line or "tuple is no longer running" in line:
+                    daemon_quitting = True
+                    daemon_started = False
 
                 # Check signaler state
                 if "signaler state changed:" in line:
@@ -98,7 +103,7 @@ class TupleState:
                             self.in_call = False
 
             # Set daemon running state based on most recent events
-            if daemon_stopped:
+            if daemon_stopped or daemon_quitting:
                 self.daemon_running = False
             elif daemon_started:
                 self.daemon_running = True
@@ -352,7 +357,14 @@ class TupleUI(QMainWindow):
 
     def update_state(self):
         """Update state from log file and refresh UI"""
+        previous_in_call = self.state.in_call
         self.state.update()
+
+        # Show window when entering a call (so user can copy URL)
+        if not previous_in_call and self.state.in_call:
+            self.show()
+            self.activateWindow()
+            self.show_action.setText("Hide Window")
 
         # Update login status
         if self.state.is_logged_in:
