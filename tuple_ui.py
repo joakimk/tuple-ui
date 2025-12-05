@@ -230,6 +230,13 @@ class TupleUI(QMainWindow):
 
         main_layout.addWidget(status_frame)
 
+        # Show Tuple UI button
+        self.show_tuple_ui_btn = QPushButton("Show Tuple UI")
+        self.show_tuple_ui_btn.setMinimumHeight(28)
+        self.show_tuple_ui_btn.setStyleSheet("font-size: 9pt; background-color: #9b59b6; color: white;")
+        self.show_tuple_ui_btn.clicked.connect(self.show_tuple_ui)
+        main_layout.addWidget(self.show_tuple_ui_btn)
+
         # Dynamic action area - shows only relevant buttons
         self.action_widget = QWidget()
         self.action_layout = QVBoxLayout(self.action_widget)
@@ -463,8 +470,6 @@ class TupleUI(QMainWindow):
 
         # State 3: In a call - show call controls
         if in_call:
-            self.action_layout.addWidget(self.end_btn)
-
             # Update share button text and action based on state
             if self.state.is_sharing:
                 self.share_toggle_btn.setText("Unshare Screen")
@@ -498,6 +503,9 @@ class TupleUI(QMainWindow):
                     pass
                 self.mute_toggle_btn.clicked.connect(lambda: self.run_command("tuple mute"))
             self.action_layout.addWidget(self.mute_toggle_btn)
+
+            # End call button in same position as New Call button
+            self.action_layout.addWidget(self.end_btn)
 
             self.action_layout.addWidget(self.daemon_stop_btn)
             self.action_layout.addStretch()
