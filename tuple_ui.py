@@ -562,6 +562,11 @@ class TupleUI(QMainWindow):
         self.show_action.triggered.connect(self.toggle_window)
         self.tray_menu.addAction(self.show_action)
 
+        # Show Tuple UI action
+        self.show_tuple_ui_action = QAction("Show Tuple UI", self)
+        self.show_tuple_ui_action.triggered.connect(self.show_tuple_ui)
+        self.tray_menu.addAction(self.show_tuple_ui_action)
+
         self.tray_menu.addSeparator()
 
         # Status section (will be updated dynamically)
@@ -624,6 +629,12 @@ class TupleUI(QMainWindow):
         """Update tray icon tooltip and menu based on current state"""
         # Update the icon itself based on state
         self.tray_icon.setIcon(self.create_tray_icon())
+
+        # Update show/hide action text based on actual window visibility
+        if self.isVisible():
+            self.show_action.setText("Hide Window")
+        else:
+            self.show_action.setText("Show Window")
 
         # Build status summary for tooltip
         status_parts = []
@@ -726,6 +737,10 @@ class TupleUI(QMainWindow):
             self.show()
             self.activateWindow()
             self.show_action.setText("Hide Window")
+
+    def show_tuple_ui(self):
+        """Run tuple ui command to show the native Tuple UI"""
+        self.run_command("tuple ui")
 
     def tray_toggle_daemon(self):
         """Toggle daemon from tray menu"""
