@@ -5,11 +5,12 @@ Tuple UI - A graphical interface for the Tuple CLI
 
 import sys
 import subprocess
+import json
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QTextEdit, QLabel, QGroupBox, QMessageBox,
-    QFrame, QSystemTrayIcon, QMenu
+    QFrame, QSystemTrayIcon, QMenu, QDialog, QFormLayout, QScrollArea
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt
 from PyQt6.QtGui import QFont, QIcon, QAction, QCloseEvent
@@ -137,11 +138,184 @@ class CommandThread(QThread):
             self.output_ready.emit(f"Error: {str(e)}", True)
 
 
+class FastButtonConfig:
+    """Manages room configuration"""
+    def __init__(self):
+        self.config_path = Path.home() / ".tuple_ui_buttons.json"
+        self.buttons = self.load()
+
+    def load(self):
+        """Load rooms from config file"""
+        if self.config_path.exists():
+            try:
+                with open(self.config_path, 'r') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+    def save(self):
+        """Save rooms to config file"""
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(self.buttons, f, indent=2)
+        except Exception as e:
+            print(f"Error saving config: {e}")
+
+    def add_button(self, name, url):
+        """Add or update a fast room"""
+        self.buttons[name] = url
+        self.save()
+
+    def remove_button(self, name):
+        """Remove a fast room"""
+        if name in self.buttons:
+            del self.buttons[name]
+            self.save()
+
+    def get_buttons(self):
+        """Get all rooms as list of tuples"""
+        return [(name, url) for name, url in self.buttons.items()]
+
+
+class FastButtonConfigDialog(QDialog):
+    """Dialog for configuring rooms"""
+    def __init__(self, button_config, parent=None):
+        super().__init__(parent)
+        self.button_config = button_config
+        self.setWindowTitle("Configure Rooms")
+        self.setMinimumWidth(400)
+        self.setMinimumHeight(300)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Room list section
+        list_label = QLabel("Rooms:")
+        layout.addWidget(list_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        self.buttons_list_layout = QVBoxLayout(scroll_widget)
+        self.buttons_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.buttons_list_layout.setSpacing(5)
+
+        self.button_items = []
+        for name, url in self.button_config.get_buttons():
+            self.add_button_item(name, url)
+
+        self.buttons_list_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        # Add new room section
+        add_label = QLabel("Add Room:")
+        layout.addWidget(add_label)
+
+        add_layout = QVBoxLayout()
+        add_layout.setSpacing(3)
+
+        name_layout = QHBoxLayout()
+        name_layout.addWidget(QLabel("Name:"))
+        self.new_name_input = QLineEdit()
+        self.new_name_input.setPlaceholderText("e.g., Dev")
+        name_layout.addWidget(self.new_name_input)
+        add_layout.addLayout(name_layout)
+
+        url_layout = QHBoxLayout()
+        url_layout.addWidget(QLabel("URL:"))
+        self.new_url_input = QLineEdit()
+        self.new_url_input.setPlaceholderText("e.g., https://tuple.app/c/...")
+        url_layout.addWidget(self.new_url_input)
+        add_layout.addLayout(url_layout)
+
+        add_btn = QPushButton("Add Room")
+        add_btn.clicked.connect(self.add_new_button)
+        add_layout.addWidget(add_btn)
+
+        layout.addLayout(add_layout)
+
+        # Dialog buttons
+        button_layout = QHBoxLayout()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        button_layout.addStretch()
+        button_layout.addWidget(close_btn)
+        layout.addLayout(button_layout)
+
+    def add_button_item(self, name, url):
+        """Add a room item to the list"""
+        item_layout = QHBoxLayout()
+        item_layout.setSpacing(5)
+
+        name_label = QLabel(name)
+        name_label.setMinimumWidth(100)
+        item_layout.addWidget(name_label)
+
+        url_label = QLineEdit()
+        url_label.setText(url)
+        url_label.setReadOnly(True)
+        url_label.setStyleSheet("font-size: 8pt;")
+        item_layout.addWidget(url_label)
+
+        delete_btn = QPushButton("Delete")
+        delete_btn.setMaximumWidth(60)
+        delete_btn.setStyleSheet("font-size: 8pt;")
+        delete_btn.clicked.connect(lambda: self.delete_button(name))
+        item_layout.addWidget(delete_btn)
+
+        self.buttons_list_layout.insertLayout(len(self.button_items), item_layout)
+        self.button_items.append((name, item_layout))
+
+    def add_new_button(self):
+        """Add a new room from input fields"""
+        name = self.new_name_input.text().strip()
+        url = self.new_url_input.text().strip()
+
+        if not name:
+            QMessageBox.warning(self, "Input Error", "Please enter a room name.")
+            return
+
+        if not url:
+            QMessageBox.warning(self, "Input Error", "Please enter a URL.")
+            return
+
+        self.button_config.add_button(name, url)
+        self.add_button_item(name, url)
+        self.new_name_input.clear()
+        self.new_url_input.clear()
+        QMessageBox.information(self, "Success", f"Room '{name}' added successfully!")
+
+    def delete_button(self, name):
+        """Delete a room"""
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Are you sure you want to delete the '{name}' room?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self.button_config.remove_button(name)
+            for i, (btn_name, layout) in enumerate(self.button_items):
+                if btn_name == name:
+                    while layout.count():
+                        item = layout.takeAt(0)
+                        if item.widget():
+                            item.widget().setParent(None)
+                    self.button_items.pop(i)
+                    break
+
+
 class TupleUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.current_thread = None
         self.state = TupleState("~/.local/share/tuple/0/log.txt")
+        self.button_config = FastButtonConfig()
+        self.fast_buttons = {}
         self.init_ui()
 
         # Set up timer to refresh state every 2 seconds
@@ -237,6 +411,33 @@ class TupleUI(QMainWindow):
         self.show_tuple_ui_btn.clicked.connect(self.show_tuple_ui)
         main_layout.addWidget(self.show_tuple_ui_btn)
 
+        # Rooms section
+        self.fast_buttons_group = QGroupBox("Rooms")
+        self.fast_buttons_group.setStyleSheet("font-size: 8pt;")
+        fast_buttons_layout = QVBoxLayout(self.fast_buttons_group)
+        fast_buttons_layout.setContentsMargins(5, 3, 5, 3)
+        fast_buttons_layout.setSpacing(3)
+
+        self.fast_buttons_container = QWidget()
+        self.fast_buttons_layout = QVBoxLayout(self.fast_buttons_container)
+        self.fast_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self.fast_buttons_layout.setSpacing(3)
+
+        fast_buttons_layout.addWidget(self.fast_buttons_container)
+
+        fast_buttons_buttons_layout = QHBoxLayout()
+        fast_buttons_buttons_layout.setSpacing(3)
+        configure_btn = QPushButton("Configure")
+        configure_btn.setMaximumHeight(20)
+        configure_btn.setMaximumWidth(80)
+        configure_btn.setStyleSheet("font-size: 7pt;")
+        configure_btn.clicked.connect(self.open_button_config_dialog)
+        fast_buttons_buttons_layout.addStretch()
+        fast_buttons_buttons_layout.addWidget(configure_btn)
+        fast_buttons_layout.addLayout(fast_buttons_buttons_layout)
+
+        main_layout.addWidget(self.fast_buttons_group)
+
         # Dynamic action area - shows only relevant buttons
         self.action_widget = QWidget()
         self.action_layout = QVBoxLayout(self.action_widget)
@@ -244,6 +445,7 @@ class TupleUI(QMainWindow):
         self.action_layout.setSpacing(5)
 
         self.create_all_buttons()
+        self.load_and_display_fast_buttons()
 
         main_layout.addWidget(self.action_widget)
 
@@ -315,6 +517,29 @@ class TupleUI(QMainWindow):
         self.mute_toggle_btn = QPushButton("Mute")
         self.mute_toggle_btn.setMinimumHeight(28)
         self.mute_toggle_btn.setStyleSheet("font-size: 9pt;")
+
+    def load_and_display_fast_buttons(self):
+        """Load fast buttons from config and display them"""
+        # Clear existing buttons
+        while self.fast_buttons_layout.count():
+            item = self.fast_buttons_layout.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+
+        self.fast_buttons = {}
+        for name, url in self.button_config.get_buttons():
+            btn = QPushButton(name)
+            btn.setMinimumHeight(24)
+            btn.setStyleSheet("font-size: 8pt; background-color: #3498db; color: white;")
+            btn.clicked.connect(lambda checked, u=url: self.run_command(f"tuple join {u}"))
+            self.fast_buttons_layout.addWidget(btn)
+            self.fast_buttons[name] = (btn, url)
+
+    def open_button_config_dialog(self):
+        """Open dialog to configure fast buttons"""
+        dialog = FastButtonConfigDialog(self.button_config, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.load_and_display_fast_buttons()
 
     def copy_personal_url(self):
         """Copy personal URL to clipboard"""
@@ -623,6 +848,8 @@ class TupleUI(QMainWindow):
 
         self.tray_menu.addSeparator()
 
+        # Rooms will be added here dynamically during update_tray_icon()
+
         # Quit action
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.quit_application)
@@ -731,6 +958,29 @@ class TupleUI(QMainWindow):
             self.tray_end_call_action.setVisible(False)
             self.tray_mute_action.setVisible(False)
             self.tray_share_action.setVisible(False)
+
+        # Update rooms in tray menu
+        # Find and remove existing room actions (added after share action)
+        actions = self.tray_menu.actions()
+        share_idx = actions.index(self.tray_share_action) if self.tray_share_action in actions else -1
+        if share_idx >= 0:
+            # Remove old room actions and separators after share action
+            while share_idx + 1 < len(self.tray_menu.actions()):
+                action = self.tray_menu.actions()[share_idx + 1]
+                if action != self.tray_menu.actions()[-1]:  # Don't remove quit action
+                    self.tray_menu.removeAction(action)
+                else:
+                    break
+
+        # Add room actions with separators
+        rooms = self.button_config.get_buttons()
+        if rooms:
+            self.tray_menu.insertSeparator(self.tray_menu.actions()[-1])
+            for name, url in rooms:
+                action = QAction(name, self)
+                action.triggered.connect(lambda checked, u=url: self.run_command(f"tuple join {u}"))
+                self.tray_menu.insertAction(self.tray_menu.actions()[-1], action)
+            self.tray_menu.insertSeparator(self.tray_menu.actions()[-1])
 
     def tray_icon_activated(self, reason):
         """Handle tray icon activation (clicks)"""
