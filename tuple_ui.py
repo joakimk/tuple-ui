@@ -6,6 +6,8 @@ Tuple UI - A graphical interface for the Tuple CLI
 import sys
 import subprocess
 import json
+import signal
+import os
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -318,10 +320,10 @@ class TupleUI(QMainWindow):
         self.fast_buttons = {}
         self.init_ui()
 
-        # Set up timer to refresh state every 2 seconds
+        # Set up timer to refresh state every 0.5 seconds
         self.state_timer = QTimer()
         self.state_timer.timeout.connect(self.update_state)
-        self.state_timer.start(2000)
+        self.state_timer.start(500)
 
         # Set up system tray icon
         self.setup_tray_icon()
@@ -333,6 +335,13 @@ class TupleUI(QMainWindow):
             self.show_action.setText("Show Window")
 
         # Initial state update
+        self.update_state()
+
+        # Set up signal handler for immediate updates from external scripts
+        signal.signal(signal.SIGUSR1, self._handle_update_signal)
+
+    def _handle_update_signal(self, signum, frame):
+        """Handle SIGUSR1 signal to update state immediately."""
         self.update_state()
 
     def init_ui(self):

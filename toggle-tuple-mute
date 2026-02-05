@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+Toggle Tuple mute status via global keybinding.
+Reads the Tuple log file to determine current mute state and toggles it.
+"""
+
+import sys
+import subprocess
+import shutil
+import os
+import time
+from pathlib import Path
+
+
+def find_tuple_binary():
+    """Find the tuple binary in the system."""
+    # Check common locations
+    common_paths = [
+        "/usr/local/bin/tuple",
+        "/usr/bin/tuple",
+        shutil.which("tuple"),
+    ]
+
+    for path in common_paths:
+        if path and Path(path).exists():
+            return path
+
+    return None
+
+
+def get_mute_state(log_path, tuple_bin):
+    """Parse the Tuple log file to determine current mute state."""
+    log_file = Path(log_path).expanduser()
+
+    if not log_file.exists():
+        return None
+
+    try:
+        with open(log_file, 'r') as f:
+            lines = f.readlines()
+
+        is_muted = False
+
+        # Parse log file to find the latest mute state
+        for line in lines:
+            if "command 'mute'" in line:
+                is_muted = True
+            elif "command 'unmute'" in line:
+                is_muted = False
+
+        # Log the detected state for debugging
+        try:
+            with open(Path.home() / ".toggle-tuple-mute.log", "a") as f:
+                f.write(f"Detected mute state: {is_muted}\n")
+        except:
+            pass
+
+        return is_muted
+    except Exception as e:
+        # Log to syslog or file for debugging KDE execution
+        try:
+            with open(Path.home() / ".toggle-tuple-mute.log", "a") as f:
+                f.write(f"Error reading log file: {e}\n")
+        except:
+            pass
+        return None
+
+
+def signal_tuple_ui_to_update():
+    """Send SIGUSR1 to tuple_ui.py process to trigger immediate update."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "python.*tuple_ui.py"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if result.stdout.strip():
+            pid = int(result.stdout.strip().split()[0])
+            os.kill(pid, 10)  # SIGUSR1 = 10
+    except Exception:
+        pass
+
+
+def toggle_mute():
+    """Toggle Tuple mute state."""
+    try:
+        with open(Path.home() / ".toggle-tuple-mute.log", "a") as f:
+            f.write("=== toggle_mute called ===\n")
+    except:
+        pass
+
+    tuple_bin = find_tuple_binary()
+
+    if not tuple_bin:
+        try:
+            with open(Path.home() / ".toggle-tuple-mute.log", "a") as f:
+                f.write("Could not find tuple binary\n")
+        except:
+            pass
+        sys.exit(1)
+
+    try:
+        with open(Path.home() / ".toggle-tuple-mute.log", "a") as f:
+            f.write(f"Found tuple binary: {tuple_bin}\n")
+    except:
+        pass
+
+    log_path = "~/.local/share/tuple/0/log.txt"
+    mute_state = get_mute_state(log_path, tuple_bin)
+
+    if mute_state is None:
+        try:
+            with open(Path.home() / ".toggle-tuple-mute.log", "a") as f:
+                f.write("Could not determine mute state\n")
+        except:
+            pass
+        sys.exit(1)
+
+    # Toggle the state
+    command_arg = "unmute" if mute_state else "mute"
+
+    try:
+        with open(Path.home() / ".toggle-tuple-mute.log", "a") as f:
+            f.write(f"Running: {tuple_bin} {command_arg}\n")
+    except:
+        pass
+
+    try:
+        # Use explicit path and avoid shell=True for better KDE compatibility
+        result = subprocess.run(
+            [tuple_bin, command_arg],
+            check=True,
+            capture_output=True,
+            timeout=5
+        )
+        try:
+            with open(Path.home() / ".toggle-tuple-mute.log", "a") as f:
+                f.write(f"Command succeeded\n")
+        except:
+            pass
+
+        # Signal the UI to update immediately
+        signal_tuple_ui_to_update()
+
+    except subprocess.CalledProcessError as e:
+        try:
+            with open(Path.home() / ".toggle-tuple-mute.log", "a") as f:
+                f.write(f"Error running command '{command_arg}': {e}\n\n")
+        except:
+            pass
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        try:
+            with open(Path.home() / ".toggle-tuple-mute.log", "a") as f:
+                f.write(f"Command timeout\n\n")
+        except:
+            pass
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    toggle_mute()
