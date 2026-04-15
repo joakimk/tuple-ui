@@ -1,942 +1,1088 @@
 #!/usr/bin/env python3
-"""
-Tuple UI - A graphical interface for the Tuple CLI
-"""
+"""Tuple UI — dark-themed graphical interface for the Tuple CLI."""
 
-import sys
-import subprocess
-import json
-import signal
 import os
+import signal
+import subprocess
+import sys
 from pathlib import Path
+
+from PyQt6.QtCore import QLockFile, QPoint, QSize, QTimer, Qt
+from PyQt6.QtGui import QAction, QCloseEvent, QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLineEdit, QTextEdit, QLabel, QGroupBox, QMessageBox,
-    QFrame, QSystemTrayIcon, QMenu, QDialog, QFormLayout, QScrollArea
+    QApplication, QComboBox, QFrame, QGroupBox, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
+    QSystemTrayIcon, QTextEdit, QVBoxLayout, QWidget,
 )
-from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt
-from PyQt6.QtGui import QFont, QIcon, QAction, QCloseEvent
+
+from tuple_ui_contacts import ContactsPanel
+from tuple_ui_core import CommandThread, TupleState
+from tuple_ui_prefs import UIPrefs
+from tuple_ui_rooms import FastButtonConfig
+from tuple_ui_settings import SettingsDialog, fetch_settings
+from tuple_ui_theme import (
+    ACCENT, DANGER, SUCCESS, TEXT_MUTED, TEXT_SUBTLE, WARN, apply_dark_theme,
+)
+
+LOCK_FILE_PATH = Path.home() / ".cache" / "tuple-ui.lock"
 
 
-class TupleState:
-    """Parses and stores Tuple state from log file"""
-    def __init__(self, log_path):
-        self.log_path = Path(log_path).expanduser()
-        self.is_logged_in = False
-        self.daemon_running = False
-        self.signaler_state = "unknown"
-        self.personal_url = None
-        self.in_call = False
-        self.last_command = None
-        self.is_muted = False
-        self.is_sharing = False
+def load_tuple_icon(size=48):
+    """Return a QIcon for the Tuple brand.
 
-    def update(self):
-        """Read and parse the log file"""
-        if not self.log_path.exists():
-            return
-
-        try:
-            with open(self.log_path, 'r') as f:
-                lines = f.readlines()
-
-            # Reset state before parsing
-            self.in_call = False
-            daemon_started = False
-            daemon_stopped = False
-            daemon_quitting = False
-
-            for line in lines:
-                # Check for auth token
-                if "saved auth token: yes" in line:
-                    self.is_logged_in = True
-                elif "saved auth token: no" in line:
-                    self.is_logged_in = False
-
-                # Check for daemon start/stop
-                if "daemon loop started" in line:
-                    daemon_started = True
-                    daemon_stopped = False
-                    daemon_quitting = False
-                elif "received 'off' message, quitting" in line or "tuple is no longer running" in line:
-                    daemon_quitting = True
-                    daemon_started = False
-
-                # Check signaler state
-                if "signaler state changed:" in line:
-                    parts = line.split("signaler state changed:")
-                    if len(parts) > 1:
-                        states = parts[1].strip().split("->")
-                        if len(states) > 1:
-                            self.signaler_state = states[1].strip()
-
-                # Check for personal URL
-                if "personal URL slug" in line and "added" in line:
-                    parts = line.split("'")
-                    if len(parts) >= 2:
-                        self.personal_url = f"https://tuple.app/{parts[1]}"
-
-                # Check for commands
-                if "command '" in line:
-                    parts = line.split("command '")
-                    if len(parts) > 1:
-                        cmd = parts[1].split("'")[0]
-                        self.last_command = cmd
-                        if cmd in ["new", "join"]:
-                            self.in_call = True
-                            self.is_muted = False  # Reset mute state when joining
-                            self.is_sharing = False  # Reset sharing state when joining
-                        elif cmd == "end":
-                            self.in_call = False
-                            self.is_muted = False  # Reset mute state when leaving
-                            self.is_sharing = False  # Reset sharing state when leaving
-                        elif cmd == "mute":
-                            self.is_muted = True
-                        elif cmd == "unmute":
-                            self.is_muted = False
-                        elif cmd == "share":
-                            self.is_sharing = True
-                        elif cmd == "unshare":
-                            self.is_sharing = False
-                        elif cmd == "off":
-                            # Daemon stopped - reset connection state
-                            daemon_stopped = True
-                            daemon_started = False
-                            self.signaler_state = "disconnected"
-                            self.in_call = False
-
-            # Set daemon running state based on most recent events
-            if daemon_stopped or daemon_quitting:
-                self.daemon_running = False
-            elif daemon_started:
-                self.daemon_running = True
-
-        except Exception as e:
-            print(f"Error reading log: {e}")
+    Prefers the installed hicolor theme icon (tuple.png, shipped with the
+    Tuple desktop package). Falls back to a rendered purple rounded square
+    if the file isn't present.
+    """
+    # Walk from largest down so window managers / taskbars that pick an
+    # appropriate size get the crispest source available.
+    candidate_sizes = [128, 48, 32, 16]
+    icon_dir = Path.home() / ".local/share/icons/hicolor"
+    icon = QIcon()
+    any_found = False
+    for s in candidate_sizes:
+        path = icon_dir / f"{s}x{s}/apps/tuple.png"
+        if path.exists():
+            icon.addFile(str(path), QSize(s, s))
+            any_found = True
+    if any_found:
+        return icon
+    return QIcon(_make_tuple_icon_pixmap(size))
 
 
-class CommandThread(QThread):
-    """Thread for running tuple commands asynchronously"""
-    output_ready = pyqtSignal(str, bool)  # output, is_error
-
-    def __init__(self, command):
-        super().__init__()
-        self.command = command
-
-    def run(self):
-        try:
-            result = subprocess.run(
-                self.command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            output = result.stdout + result.stderr
-            self.output_ready.emit(output, result.returncode != 0)
-        except subprocess.TimeoutExpired:
-            self.output_ready.emit("Command timed out after 30 seconds", True)
-        except Exception as e:
-            self.output_ready.emit(f"Error: {str(e)}", True)
-
-
-class FastButtonConfig:
-    """Manages room configuration"""
-    def __init__(self):
-        self.config_path = Path.home() / ".tuple_ui_buttons.json"
-        self.buttons = self.load()
-
-    def load(self):
-        """Load rooms from config file"""
-        if self.config_path.exists():
-            try:
-                with open(self.config_path, 'r') as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
-
-    def save(self):
-        """Save rooms to config file"""
-        try:
-            with open(self.config_path, 'w') as f:
-                json.dump(self.buttons, f, indent=2)
-        except Exception as e:
-            print(f"Error saving config: {e}")
-
-    def add_button(self, name, url):
-        """Add or update a fast room"""
-        self.buttons[name] = url
-        self.save()
-
-    def remove_button(self, name):
-        """Remove a fast room"""
-        if name in self.buttons:
-            del self.buttons[name]
-            self.save()
-
-    def get_buttons(self):
-        """Get all rooms as list of tuples"""
-        return [(name, url) for name, url in self.buttons.items()]
-
-
-class FastButtonConfigDialog(QDialog):
-    """Dialog for configuring rooms"""
-    def __init__(self, button_config, parent=None):
-        super().__init__(parent)
-        self.button_config = button_config
-        self.setWindowTitle("Configure Rooms")
-        self.setMinimumWidth(400)
-        self.setMinimumHeight(300)
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-
-        # Room list section
-        list_label = QLabel("Rooms:")
-        layout.addWidget(list_label)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll_widget = QWidget()
-        self.buttons_list_layout = QVBoxLayout(scroll_widget)
-        self.buttons_list_layout.setContentsMargins(0, 0, 0, 0)
-        self.buttons_list_layout.setSpacing(5)
-
-        self.button_items = []
-        for name, url in self.button_config.get_buttons():
-            self.add_button_item(name, url)
-
-        self.buttons_list_layout.addStretch()
-        scroll.setWidget(scroll_widget)
-        layout.addWidget(scroll)
-
-        # Add new room section
-        add_label = QLabel("Add Room:")
-        layout.addWidget(add_label)
-
-        add_layout = QVBoxLayout()
-        add_layout.setSpacing(3)
-
-        name_layout = QHBoxLayout()
-        name_layout.addWidget(QLabel("Name:"))
-        self.new_name_input = QLineEdit()
-        self.new_name_input.setPlaceholderText("e.g., Dev")
-        name_layout.addWidget(self.new_name_input)
-        add_layout.addLayout(name_layout)
-
-        url_layout = QHBoxLayout()
-        url_layout.addWidget(QLabel("URL:"))
-        self.new_url_input = QLineEdit()
-        self.new_url_input.setPlaceholderText("e.g., https://tuple.app/c/...")
-        url_layout.addWidget(self.new_url_input)
-        add_layout.addLayout(url_layout)
-
-        add_btn = QPushButton("Add Room")
-        add_btn.clicked.connect(self.add_new_button)
-        add_layout.addWidget(add_btn)
-
-        layout.addLayout(add_layout)
-
-        # Dialog buttons
-        button_layout = QHBoxLayout()
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        button_layout.addStretch()
-        button_layout.addWidget(close_btn)
-        layout.addLayout(button_layout)
-
-    def add_button_item(self, name, url):
-        """Add a room item to the list"""
-        item_layout = QHBoxLayout()
-        item_layout.setSpacing(5)
-
-        name_label = QLabel(name)
-        name_label.setMinimumWidth(100)
-        item_layout.addWidget(name_label)
-
-        url_label = QLineEdit()
-        url_label.setText(url)
-        url_label.setReadOnly(True)
-        url_label.setStyleSheet("font-size: 8pt;")
-        item_layout.addWidget(url_label)
-
-        delete_btn = QPushButton("Delete")
-        delete_btn.setMaximumWidth(60)
-        delete_btn.setStyleSheet("font-size: 8pt;")
-        delete_btn.clicked.connect(lambda: self.delete_button(name))
-        item_layout.addWidget(delete_btn)
-
-        self.buttons_list_layout.insertLayout(len(self.button_items), item_layout)
-        self.button_items.append((name, item_layout))
-
-    def add_new_button(self):
-        """Add a new room from input fields"""
-        name = self.new_name_input.text().strip()
-        url = self.new_url_input.text().strip()
-
-        if not name:
-            QMessageBox.warning(self, "Input Error", "Please enter a room name.")
-            return
-
-        if not url:
-            QMessageBox.warning(self, "Input Error", "Please enter a URL.")
-            return
-
-        self.button_config.add_button(name, url)
-        self.add_button_item(name, url)
-        self.new_name_input.clear()
-        self.new_url_input.clear()
-        QMessageBox.information(self, "Success", f"Room '{name}' added successfully!")
-
-    def delete_button(self, name):
-        """Delete a room"""
-        reply = QMessageBox.question(
-            self,
-            "Confirm Delete",
-            f"Are you sure you want to delete the '{name}' room?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-
-        if reply == QMessageBox.StandardButton.Yes:
-            self.button_config.remove_button(name)
-            for i, (btn_name, layout) in enumerate(self.button_items):
-                if btn_name == name:
-                    while layout.count():
-                        item = layout.takeAt(0)
-                        if item.widget():
-                            item.widget().setParent(None)
-                    self.button_items.pop(i)
-                    break
+def _make_tuple_icon_pixmap(size):
+    """Fallback: render a rounded-square Tuple-purple icon."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor(ACCENT))
+    painter.setPen(Qt.PenStyle.NoPen)
+    inset = max(1, size // 10)
+    radius = max(2, size // 5)
+    painter.drawRoundedRect(
+        inset, inset, size - 2 * inset, size - 2 * inset, radius, radius,
+    )
+    painter.end()
+    return pixmap
 
 
 class TupleUI(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._quitting = False
+        self._awaiting_auth_code = False
+        self._capture_setting = None   # cached `capture` setting value
+        self._contacts_loaded = False  # first-visible auto-refresh guard
+        self._pending_command = None   # last command dispatched via run_command
+        self._demo_mode = False        # screenshot mode: anonymize + mask URL
+
         self.current_thread = None
         self.state = TupleState("~/.local/share/tuple/0/log.txt")
         self.button_config = FastButtonConfig()
-        self.fast_buttons = {}
-        self.init_ui()
+        self.prefs = UIPrefs()
 
-        # Set up timer to refresh state every 0.5 seconds
-        self.state_timer = QTimer()
+        self._build_ui()
+
+        self.state_timer = QTimer(self)
         self.state_timer.timeout.connect(self.update_state)
         self.state_timer.start(500)
 
-        # Set up system tray icon
-        self.setup_tray_icon()
+        self._setup_tray_icon()
 
-        # Set initial show/hide action text based on window visibility
         if self.isVisible():
             self.show_action.setText("Hide Window")
         else:
             self.show_action.setText("Show Window")
 
-        # Initial state update
         self.update_state()
+        self._install_signal_handlers()
 
-        # Set up signal handler for immediate updates from external scripts
-        signal.signal(signal.SIGUSR1, self._handle_update_signal)
+    # ------------------------------------------------------------------ UI
 
-    def _handle_update_signal(self, signum, frame):
-        """Handle SIGUSR1 signal to update state immediately."""
-        self.update_state()
-
-    def init_ui(self):
+    def _build_ui(self):
         self.setWindowTitle("Tuple")
-        self.setMinimumSize(100, 400)
-        self.resize(200, 500)
+        self.setWindowIcon(load_tuple_icon())
+        self.setMinimumSize(640, 520)
+        self.resize(760, 640)
 
-        # Create central widget and main layout
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(5, 5, 5, 5)
-        main_layout.setSpacing(5)
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(14, 10, 14, 10)
+        root.setSpacing(10)
 
-        # Create status panel
-        status_frame = QFrame()
-        status_frame.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
-        status_layout = QHBoxLayout(status_frame)
-        status_layout.setContentsMargins(5, 3, 5, 3)
-        status_layout.setSpacing(8)
+        # ---- Header strip: logo | state | stretch | demo | cog | account | native ----
+        # State label ("Ready" / "In Call" / "Daemon Off" / "Signed Out") sits
+        # right next to the Tuple wordmark, matching the official UI's
+        # "Tuple · <state>" banner.
+        header = QHBoxLayout()
+        header.setSpacing(6)
 
-        # Create vertical layout for status items
-        status_vertical = QVBoxLayout()
-        status_vertical.setSpacing(2)
+        logo = QLabel("Tuple")
+        logo.setStyleSheet(f"color: {ACCENT}; font-weight: 600; font-size: 10pt;")
+        header.addWidget(logo)
 
-        # Status labels
-        self.login_status_label = QLabel("Login: Unknown")
-        self.login_status_label.setFont(QFont("", 8))
-        status_vertical.addWidget(self.login_status_label)
+        self.state_header = QLabel("")
+        self.state_header.setObjectName("stateHeader")
+        self.state_header.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(self.state_header)
 
-        self.daemon_status_label = QLabel("Daemon: Unknown")
-        self.daemon_status_label.setFont(QFont("", 8))
-        status_vertical.addWidget(self.daemon_status_label)
+        header.addStretch(1)
 
-        self.connection_status_label = QLabel("Connection: Unknown")
-        self.connection_status_label.setFont(QFont("", 8))
-        status_vertical.addWidget(self.connection_status_label)
+        # Demo / screenshot mode: anonymizes contacts, masks the personal URL,
+        # clears output. Checkable so the button itself shows active state.
+        self.demo_btn = QPushButton("🎭")
+        self.demo_btn.setProperty("kind", "icon")
+        self.demo_btn.setCheckable(True)
+        self.demo_btn.setToolTip(
+            "Demo / screenshot mode — anonymizes contact names and emails, "
+            "masks the personal URL, and clears output. Toggle off to restore."
+        )
+        self.demo_btn.toggled.connect(self._toggle_demo_mode)
+        header.addWidget(self.demo_btn)
 
-        self.call_status_label = QLabel("Call: None")
-        self.call_status_label.setFont(QFont("", 8))
-        status_vertical.addWidget(self.call_status_label)
+        self.settings_btn = QPushButton("⚙")
+        self.settings_btn.setProperty("kind", "icon")
+        self.settings_btn.setToolTip("Settings")
+        self.settings_btn.clicked.connect(self._open_settings)
+        header.addWidget(self.settings_btn)
 
-        self.mute_status_label = QLabel("Mic: Unknown")
-        self.mute_status_label.setFont(QFont("", 8))
-        status_vertical.addWidget(self.mute_status_label)
+        self.account_btn = QPushButton("👤")
+        self.account_btn.setProperty("kind", "icon")
+        self.account_btn.setToolTip("Account")
+        self.account_menu = QMenu(self)
+        self._build_account_menu()
+        self.account_btn.clicked.connect(self._show_account_menu)
+        header.addWidget(self.account_btn)
 
-        # Personal URL with copy button
-        url_layout = QHBoxLayout()
-        url_layout.setSpacing(3)
+        # Tuple icon button — opens the native Tuple debug UI (`tuple ui`).
+        # Prefer the real tuple.png from the system icon theme; fall back to a
+        # rendered purple rounded square if we can't find it.
+        self.native_ui_btn = QPushButton()
+        self.native_ui_btn.setProperty("kind", "icon")
+        self.native_ui_btn.setToolTip("Open native Tuple UI")
+        self.native_ui_btn.setIcon(self._load_tuple_icon(18))
+        self.native_ui_btn.clicked.connect(lambda: self.run_command("tuple ui"))
+        header.addWidget(self.native_ui_btn)
 
-        self.personal_url_label = QLineEdit()
-        self.personal_url_label.setReadOnly(True)
-        self.personal_url_label.setFont(QFont("", 7))
-        self.personal_url_label.setMaximumHeight(20)
-        self.personal_url_label.setFrame(False)
-        self.personal_url_label.setStyleSheet("background: transparent;")
-        url_layout.addWidget(self.personal_url_label)
+        root.addLayout(header)
+
+        # ---- Two-column body: actions/output on left, rooms+contacts on right.
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        root.addLayout(body, 1)
+
+        # === LEFT COLUMN ======================================================
+        left = QVBoxLayout()
+        left.setSpacing(10)
+        body.addLayout(left, 1)
+
+        # (State header lives in the top header strip, next to the Tuple
+        # wordmark — see `_build_ui` above.)
+
+        # Personal URL panel (only shown when we actually know the URL).
+        self.url_panel = QFrame()
+        self.url_panel.setProperty("role", "panel")
+        url_layout = QHBoxLayout(self.url_panel)
+        url_layout.setContentsMargins(8, 6, 8, 6)
+        url_layout.setSpacing(6)
+
+        self.personal_url_input = QLineEdit()
+        self.personal_url_input.setReadOnly(True)
+        self.personal_url_input.setPlaceholderText("Personal URL")
+        url_layout.addWidget(self.personal_url_input, 1)
 
         self.copy_url_btn = QPushButton("Copy")
-        self.copy_url_btn.setMaximumHeight(18)
-        self.copy_url_btn.setMaximumWidth(40)
-        self.copy_url_btn.setStyleSheet("font-size: 7pt; padding: 2px;")
-        self.copy_url_btn.clicked.connect(self.copy_personal_url)
+        self.copy_url_btn.setFixedWidth(64)
+        self.copy_url_btn.clicked.connect(self._copy_personal_url)
         url_layout.addWidget(self.copy_url_btn)
 
-        status_vertical.addLayout(url_layout)
+        left.addWidget(self.url_panel)
 
-        status_layout.addLayout(status_vertical)
+        # Controls group box — wraps both the stable signed-in layout and a
+        # transient area used for the signed-out / auth-code flows.
+        self.controls_group = QGroupBox("Controls")
+        controls_outer = QVBoxLayout(self.controls_group)
+        controls_outer.setContentsMargins(12, 16, 12, 16)
+        controls_outer.setSpacing(8)
 
-        main_layout.addWidget(status_frame)
+        # Stable signed-in controls: built once with all widgets persistent
+        # so the layout never shifts between Ready / In Call / Daemon Off —
+        # state changes just flip enabled/label/color.
+        self.signed_in_area = self._build_signed_in_controls()
+        controls_outer.addWidget(self.signed_in_area)
 
-        # Show Tuple UI button
-        self.show_tuple_ui_btn = QPushButton("Show Tuple UI")
-        self.show_tuple_ui_btn.setMinimumHeight(28)
-        self.show_tuple_ui_btn.setStyleSheet("font-size: 9pt; background-color: #9b59b6; color: white;")
-        self.show_tuple_ui_btn.clicked.connect(self.show_tuple_ui)
-        main_layout.addWidget(self.show_tuple_ui_btn)
+        # Transient area: hosts signed-out / auth-code views, which *do*
+        # rebuild on demand because their widget sets differ.
+        self.transient_area = QWidget()
+        self.transient_layout = QVBoxLayout(self.transient_area)
+        self.transient_layout.setContentsMargins(0, 0, 0, 4)
+        self.transient_layout.setSpacing(6)
+        controls_outer.addWidget(self.transient_area)
+        left.addWidget(self.controls_group)
 
-        # Rooms section
-        self.fast_buttons_group = QGroupBox("Rooms")
-        self.fast_buttons_group.setStyleSheet("font-size: 8pt;")
-        fast_buttons_layout = QVBoxLayout(self.fast_buttons_group)
-        fast_buttons_layout.setContentsMargins(5, 3, 5, 3)
-        fast_buttons_layout.setSpacing(3)
-
-        self.fast_buttons_container = QWidget()
-        self.fast_buttons_layout = QVBoxLayout(self.fast_buttons_container)
-        self.fast_buttons_layout.setContentsMargins(0, 0, 0, 0)
-        self.fast_buttons_layout.setSpacing(3)
-
-        fast_buttons_layout.addWidget(self.fast_buttons_container)
-
-        fast_buttons_buttons_layout = QHBoxLayout()
-        fast_buttons_buttons_layout.setSpacing(3)
-        configure_btn = QPushButton("Configure")
-        configure_btn.setMaximumHeight(20)
-        configure_btn.setMaximumWidth(80)
-        configure_btn.setStyleSheet("font-size: 7pt;")
-        configure_btn.clicked.connect(self.open_button_config_dialog)
-        fast_buttons_buttons_layout.addStretch()
-        fast_buttons_buttons_layout.addWidget(configure_btn)
-        fast_buttons_layout.addLayout(fast_buttons_buttons_layout)
-
-        main_layout.addWidget(self.fast_buttons_group)
-
-        # Dynamic action area - shows only relevant buttons
-        self.action_widget = QWidget()
-        self.action_layout = QVBoxLayout(self.action_widget)
-        self.action_layout.setContentsMargins(5, 5, 5, 5)
-        self.action_layout.setSpacing(5)
-
-        self.create_all_buttons()
-        self.load_and_display_fast_buttons()
-
-        main_layout.addWidget(self.action_widget)
-
-        # Output area
+        # Output (always visible per user preference).
         output_group = QGroupBox("Output")
-        output_layout = QVBoxLayout()
-        output_layout.setContentsMargins(5, 5, 5, 5)
-        output_layout.setSpacing(3)
+        output_layout = QVBoxLayout(output_group)
+        output_layout.setContentsMargins(10, 12, 10, 10)
+        output_layout.setSpacing(6)
 
         self.output_text = QTextEdit()
         self.output_text.setReadOnly(True)
-        self.output_text.setMinimumHeight(100)
-        self.output_text.setMaximumHeight(120)
-        font = QFont("Monospace", 8)
-        self.output_text.setFont(font)
-        output_layout.addWidget(self.output_text)
+        self.output_text.setMinimumHeight(90)
+        self.output_text.setFont(QFont("Monospace", 9))
+        output_layout.addWidget(self.output_text, 1)
 
-        clear_button = QPushButton("Clear")
-        clear_button.setMaximumHeight(20)
-        clear_button.setStyleSheet("font-size: 8pt;")
-        clear_button.clicked.connect(self.output_text.clear)
-        output_layout.addWidget(clear_button)
+        # Bottom row of the output area: daemon toggle on the left, Clear on
+        # the right. Keeping the daemon button out of the main controls stack
+        # avoids the cramped spacing under Share Screen and matches the user's
+        # expectation of a low-traffic administrative action living at the
+        # window's bottom-left.
+        clear_row = QHBoxLayout()
+        self.daemon_btn = QPushButton("Stop Daemon")
+        self.daemon_btn.setMinimumHeight(26)
+        # Wide enough for bold "Start Daemon" (success-kind font-weight is 600).
+        self.daemon_btn.setMinimumWidth(130)
+        self.daemon_btn.clicked.connect(self._on_daemon_clicked)
+        clear_row.addWidget(self.daemon_btn)
+        clear_row.addStretch(1)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedWidth(72)
+        clear_btn.clicked.connect(self.output_text.clear)
+        clear_row.addWidget(clear_btn)
+        output_layout.addLayout(clear_row)
 
-        output_group.setLayout(output_layout)
-        main_layout.addWidget(output_group)
+        left.addWidget(output_group, 1)
 
-    def create_all_buttons(self):
-        """Create all action buttons (will be shown/hidden based on state)"""
-        # Daemon start button
-        self.daemon_start_btn = QPushButton("Start Daemon")
-        self.daemon_start_btn.setMinimumHeight(32)
-        self.daemon_start_btn.setStyleSheet("background-color: #51cf66; font-size: 10pt; color: white; font-weight: bold;")
-        self.daemon_start_btn.clicked.connect(lambda: self.run_command("tuple on"))
+        # === RIGHT COLUMN =====================================================
+        right = QVBoxLayout()
+        right.setSpacing(10)
+        body.addLayout(right, 1)
 
-        # Daemon stop button
-        self.daemon_stop_btn = QPushButton("Stop Daemon")
-        self.daemon_stop_btn.setMinimumHeight(28)
-        self.daemon_stop_btn.setStyleSheet("background-color: #ff6b6b; font-size: 9pt; color: white;")
-        self.daemon_stop_btn.clicked.connect(lambda: self.run_command("tuple off"))
+        # Rooms (top of right column). Configuration lives in the Settings
+        # dialog now — no inline "Configure" button here.
+        self.rooms_group = QGroupBox("Rooms")
+        rooms_outer = QVBoxLayout(self.rooms_group)
+        rooms_outer.setContentsMargins(10, 12, 10, 10)
+        rooms_outer.setSpacing(6)
 
-        # Join call input and button
+        self.rooms_container = QWidget()
+        self.rooms_container_layout = QVBoxLayout(self.rooms_container)
+        self.rooms_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.rooms_container_layout.setSpacing(4)
+        rooms_outer.addWidget(self.rooms_container)
+
+        right.addWidget(self.rooms_group)
+
+        # Contacts (below rooms, expands to fill).
+        self.contacts_group = QGroupBox("Contacts")
+        contacts_outer = QVBoxLayout(self.contacts_group)
+        contacts_outer.setContentsMargins(10, 12, 10, 10)
+        self.contacts_panel = ContactsPanel(run_command=self.run_command)
+        contacts_outer.addWidget(self.contacts_panel)
+        right.addWidget(self.contacts_group, 1)
+
+        # ---- Footer (full width) ----
+        self.footer_label = QLabel("")
+        self.footer_label.setObjectName("footer")
+        root.addWidget(self.footer_label)
+
+        self._load_rooms()
+
+    def _build_account_menu(self):
+        self.account_menu.clear()
+        self.account_signin_action = QAction("Sign In", self)
+        self.account_signin_action.triggered.connect(self._start_signin)
+        self.account_menu.addAction(self.account_signin_action)
+
+        self.account_signout_action = QAction("Sign Out", self)
+        self.account_signout_action.triggered.connect(
+            lambda: self.run_command("tuple logout")
+        )
+        self.account_menu.addAction(self.account_signout_action)
+
+        self.account_menu.addSeparator()
+        show_native = QAction("Show Native Tuple UI", self)
+        show_native.triggered.connect(lambda: self.run_command("tuple ui"))
+        self.account_menu.addAction(show_native)
+
+    def _show_account_menu(self):
+        self.account_menu.exec(
+            self.account_btn.mapToGlobal(QPoint(0, self.account_btn.height()))
+        )
+
+    def _clear_transient_area(self):
+        while self.transient_layout.count():
+            item = self.transient_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                continue
+            sub = item.layout()
+            if sub:
+                self._clear_sublayout(sub)
+                sub.setParent(None)
+
+    def _clear_sublayout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+            sub = item.layout()
+            if sub:
+                self._clear_sublayout(sub)
+
+    def rebuild_actions(self):
+        """Switch between the stable signed-in controls and transient views.
+
+        Widgets inside `signed_in_area` are persistent — we only flip their
+        enabled/label/colour in `_apply_signed_in_state`. The transient
+        area is rebuilt on demand for sign-in flows.
+        """
+        if not self.state.is_logged_in:
+            self.signed_in_area.setVisible(False)
+            self.transient_area.setVisible(True)
+            self._clear_transient_area()
+            if self._awaiting_auth_code:
+                self._build_auth_code_state()
+            else:
+                self._build_signed_out_state()
+            return
+
+        self.transient_area.setVisible(False)
+        self._clear_transient_area()
+        self.signed_in_area.setVisible(True)
+        self._apply_signed_in_state()
+
+    def _build_signed_out_state(self):
+        msg = QLabel("You're not signed in to Tuple.")
+        msg.setStyleSheet(f"color: {TEXT_MUTED};")
+        msg.setWordWrap(True)
+        self.transient_layout.addWidget(msg)
+
+        sign_in = QPushButton("Sign In")
+        sign_in.setProperty("kind", "primary")
+        sign_in.setMinimumHeight(36)
+        sign_in.clicked.connect(self._start_signin)
+        self.transient_layout.addWidget(sign_in)
+        self.transient_layout.addStretch(1)
+
+    def _build_auth_code_state(self):
+        msg = QLabel(
+            "Complete sign-in in your browser, then paste the auth code below."
+        )
+        msg.setStyleSheet(f"color: {TEXT_MUTED};")
+        msg.setWordWrap(True)
+        self.transient_layout.addWidget(msg)
+
+        self.auth_code_input = QLineEdit()
+        self.auth_code_input.setPlaceholderText("Auth code")
+        self.auth_code_input.returnPressed.connect(self._submit_auth_code)
+        self.transient_layout.addWidget(self.auth_code_input)
+
+        row = QHBoxLayout()
+        submit = QPushButton("Submit")
+        submit.setProperty("kind", "primary")
+        submit.clicked.connect(self._submit_auth_code)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self._cancel_signin)
+        row.addWidget(submit, 1)
+        row.addWidget(cancel, 0)
+        self.transient_layout.addLayout(row)
+        self.transient_layout.addStretch(1)
+
+    # ------------- Signed-in stable controls (persistent widgets) --------
+
+    def _build_signed_in_controls(self):
+        """Build the one fixed layout used for Daemon Off / Ready / In Call.
+
+        Widgets are created once and stored on self; state changes only
+        toggle `setEnabled`, labels and colours via `_apply_signed_in_state`.
+        Nothing in here is ever rebuilt, so the button positions don't
+        shift when the call state changes.
+        """
+        BTN_W = 140
+        BTN_H = 26
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 4)
+        layout.setSpacing(10)
+
+        # --- URL input + Join Call row -----------------------------------
+        join_row = QHBoxLayout()
+        join_row.setContentsMargins(0, 0, 0, 0)
+        join_row.setSpacing(6)
         self.call_url_input = QLineEdit()
-        self.call_url_input.setPlaceholderText("Enter call URL...")
-        self.call_url_input.setMinimumHeight(24)
-        self.call_url_input.setStyleSheet("font-size: 9pt;")
+        self.call_url_input.setPlaceholderText("Paste a call URL to join…")
+        self.call_url_input.returnPressed.connect(self._join_call)
+        join_row.addWidget(self.call_url_input, 1)
 
         self.join_btn = QPushButton("Join Call")
-        self.join_btn.setMinimumHeight(28)
-        self.join_btn.setStyleSheet("font-size: 10pt; background-color: #3498db; color: white;")
-        self.join_btn.clicked.connect(self.join_call)
+        self.join_btn.setMinimumHeight(BTN_H)
+        self.join_btn.clicked.connect(self._join_call)
+        join_row.addWidget(self.join_btn, 0)
+        layout.addLayout(join_row)
 
-        self.new_btn = QPushButton("New Call")
-        self.new_btn.setMinimumHeight(28)
-        self.new_btn.setStyleSheet("font-size: 10pt; background-color: #3498db; color: white;")
-        self.new_btn.clicked.connect(lambda: self.run_command("tuple new"))
+        # --- Primary action: New Call ↔ Hang Up --------------------------
+        # Single persistent button whose label / `kind` property swaps
+        # between "New Call" (primary purple) and "Hang Up" (danger red).
+        self.primary_btn = QPushButton("New Call")
+        self.primary_btn.setMinimumHeight(36)
+        self.primary_btn.clicked.connect(self._on_primary_clicked)
+        layout.addWidget(self.primary_btn)
 
-        # In-call controls
-        self.end_btn = QPushButton("End Call")
-        self.end_btn.setMinimumHeight(32)
-        self.end_btn.setStyleSheet("background-color: #ff6b6b; font-size: 10pt; color: white; font-weight: bold;")
-        self.end_btn.clicked.connect(lambda: self.run_command("tuple end"))
+        # --- Mute row ----------------------------------------------------
+        self.mute_btn = QPushButton("Mute")
+        self.mute_btn.setFixedSize(BTN_W, BTN_H)
+        self.mute_btn.clicked.connect(self._on_mute_clicked)
+        self.mute_sidecar = QLabel("mic on")
+        self.mute_sidecar.setProperty("role", "sidecar")
+        self.mute_sidecar.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        mute_row = QHBoxLayout()
+        mute_row.setContentsMargins(0, 0, 0, 0)
+        mute_row.setSpacing(8)
+        mute_row.addWidget(self.mute_btn, 0)
+        mute_row.addWidget(self.mute_sidecar, 0)
+        mute_row.addStretch(1)
+        layout.addLayout(mute_row)
 
-        # Screen sharing toggle button
-        self.share_toggle_btn = QPushButton("Share Screen")
-        self.share_toggle_btn.setMinimumHeight(28)
-        self.share_toggle_btn.setStyleSheet("font-size: 9pt;")
+        # --- Share row (with capture combo) ------------------------------
+        self.share_btn = QPushButton("Share Screen")
+        self.share_btn.setFixedSize(BTN_W, BTN_H)
+        self.share_btn.clicked.connect(self._on_share_clicked)
+        self.capture_combo = QComboBox()
+        self.capture_combo.addItems(["auto", "x11", "portal"])
+        self.capture_combo.setFixedHeight(BTN_H)
+        self.capture_combo.setMinimumWidth(90)
+        self.capture_combo.setToolTip("Screen capture mechanism (tuple set capture)")
+        self.capture_combo.currentTextChanged.connect(self._on_capture_changed)
+        share_row = QHBoxLayout()
+        share_row.setContentsMargins(0, 0, 0, 0)
+        share_row.setSpacing(8)
+        share_row.addWidget(self.share_btn, 0)
+        share_row.addWidget(self.capture_combo, 0, Qt.AlignmentFlag.AlignVCenter)
+        share_row.addStretch(1)
+        layout.addLayout(share_row)
 
-        # Mute toggle button
-        self.mute_toggle_btn = QPushButton("Mute")
-        self.mute_toggle_btn.setMinimumHeight(28)
-        self.mute_toggle_btn.setStyleSheet("font-size: 9pt;")
+        # Daemon toggle lives in the Output area's bottom row, not here —
+        # see `_build_ui` where `self.daemon_btn` is created next to Clear.
 
-    def load_and_display_fast_buttons(self):
-        """Load fast buttons from config and display them"""
-        # Clear existing buttons
-        while self.fast_buttons_layout.count():
-            item = self.fast_buttons_layout.takeAt(0)
+        layout.addStretch(1)
+        return container
+
+    def _apply_signed_in_state(self):
+        """Flip enabled/label/kind on the persistent controls from state."""
+        running = self.state.daemon_running
+        in_call = self.state.in_call
+
+        # URL input + Join: usable only when we have a live daemon and
+        # aren't already on a call.
+        can_join = running and not in_call
+        self.call_url_input.setEnabled(can_join)
+        self.join_btn.setEnabled(can_join)
+
+        # Primary button: "Hang Up" (danger) while in call; "New Call"
+        # (primary purple) otherwise. Disabled when the daemon is off.
+        if in_call:
+            self.primary_btn.setText("Hang Up")
+            self._set_button_kind(self.primary_btn, "danger")
+            self.primary_btn.setEnabled(True)
+        else:
+            self.primary_btn.setText("New Call")
+            self._set_button_kind(self.primary_btn, "primary")
+            self.primary_btn.setEnabled(running)
+
+        # Mute — only meaningful in-call. Keep visible but disabled otherwise.
+        self.mute_btn.setEnabled(in_call)
+        if in_call and self.state.is_muted:
+            self.mute_btn.setText("Unmute")
+            self._set_sidecar(self.mute_sidecar, "MUTED", "sidecar-alert")
+        elif in_call:
+            self.mute_btn.setText("Mute")
+            self._set_sidecar(self.mute_sidecar, "mic on", "sidecar")
+        else:
+            self.mute_btn.setText("Mute")
+            self._set_sidecar(self.mute_sidecar, "—", "sidecar-muted")
+
+        # Share + capture — same treatment.
+        self.share_btn.setEnabled(in_call)
+        self.capture_combo.setEnabled(in_call)
+        self.share_btn.setText("Unshare Screen" if in_call and self.state.is_sharing else "Share Screen")
+        # Sync capture combo without firing the change handler.
+        desired_capture = (
+            self._capture_setting if self._capture_setting in ("auto", "x11", "portal") else "auto"
+        )
+        if self.capture_combo.currentText() != desired_capture:
+            self.capture_combo.blockSignals(True)
+            self.capture_combo.setCurrentText(desired_capture)
+            self.capture_combo.blockSignals(False)
+
+        # Daemon toggle.
+        if running:
+            self.daemon_btn.setText("Stop Daemon")
+            self._set_button_kind(self.daemon_btn, None)
+        else:
+            self.daemon_btn.setText("Start Daemon")
+            self._set_button_kind(self.daemon_btn, "success")
+
+    @staticmethod
+    def _set_button_kind(btn, kind):
+        """Swap a QPushButton's `kind` QSS property and re-polish."""
+        current = btn.property("kind")
+        if current == kind:
+            return
+        if kind is None:
+            # Clearing: Qt has no delete-property API on stylesheet lookup,
+            # so set an empty string (matches default QPushButton rule).
+            btn.setProperty("kind", "")
+        else:
+            btn.setProperty("kind", kind)
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+        btn.update()
+
+    @staticmethod
+    def _set_sidecar(label, text, role):
+        label.setText(text)
+        if label.property("role") != role:
+            label.setProperty("role", role)
+            label.style().unpolish(label)
+            label.style().polish(label)
+
+    # ------------- Click dispatchers --------------------------------------
+
+    def _on_primary_clicked(self):
+        if self.state.in_call:
+            self.run_command("tuple end")
+        else:
+            self.run_command("tuple new")
+
+    def _on_mute_clicked(self):
+        if self.state.is_muted:
+            self.run_command("tuple unmute")
+        else:
+            self.run_command("tuple mute")
+
+    def _on_share_clicked(self):
+        if self.state.is_sharing:
+            self.run_command("tuple unshare")
+        else:
+            self.run_command("tuple share")
+
+    def _on_daemon_clicked(self):
+        if self.state.daemon_running:
+            self.run_command("tuple off")
+        else:
+            self.run_command("tuple on")
+
+    def _on_capture_changed(self, value):
+        """User picked a new `capture` mechanism from the in-call combo."""
+        if value == self._capture_setting:
+            return
+        self._capture_setting = value
+        self.run_command(f"tuple set capture {value}")
+
+    # ---------------------------------------------------- Rooms & output
+
+    def _load_rooms(self):
+        # Clear existing room buttons
+        while self.rooms_container_layout.count():
+            item = self.rooms_container_layout.takeAt(0)
             if item.widget():
                 item.widget().setParent(None)
 
-        self.fast_buttons = {}
-        for name, url in self.button_config.get_buttons():
-            btn = QPushButton(name)
-            btn.setMinimumHeight(24)
-            btn.setStyleSheet("font-size: 8pt; background-color: #3498db; color: white;")
-            btn.clicked.connect(lambda checked, u=url: self.run_command(f"tuple join {u}"))
-            self.fast_buttons_layout.addWidget(btn)
-            self.fast_buttons[name] = (btn, url)
-
-    def open_button_config_dialog(self):
-        """Open dialog to configure fast buttons"""
-        dialog = FastButtonConfigDialog(self.button_config, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.load_and_display_fast_buttons()
-
-    def copy_personal_url(self):
-        """Copy personal URL to clipboard"""
-        url = self.personal_url_label.text()
-        if url:
-            clipboard = QApplication.clipboard()
-            clipboard.setText(url)
-            self.log_output("URL copied to clipboard!\n", False)
-
-    def join_call(self):
-        """Join a call with the provided URL"""
-        call_url = self.call_url_input.text().strip()
-        if not call_url:
-            QMessageBox.warning(self, "Input Required", "Please enter a call URL.")
+        rooms = self.button_config.get_buttons()
+        if not rooms:
+            empty = QLabel("No rooms configured.\nAdd some in ⚙ Settings → Rooms.")
+            empty.setStyleSheet(f"color: {TEXT_SUBTLE}; font-size: 9pt;")
+            empty.setWordWrap(True)
+            self.rooms_container_layout.addWidget(empty)
             return
-        self.run_command(f"tuple join {call_url}")
+
+        for i, (name, url) in enumerate(rooms):
+            if self._demo_mode:
+                label = f"Room {i + 1}"
+                tooltip = "Demo room"
+            else:
+                label = name
+                tooltip = url
+            btn = QPushButton(label)
+            btn.setToolTip(tooltip)
+            btn.setMinimumHeight(26)
+            btn.clicked.connect(lambda checked=False, u=url: self.run_command(f"tuple join {u}"))
+            self.rooms_container_layout.addWidget(btn)
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self, prefs=self.prefs, button_config=self.button_config)
+        dlg.exec()
+        # Reload rooms — user may have added/removed some inside the dialog.
+        self._load_rooms()
+        # Invalidate cached capture setting so sidecar reflects any change.
+        self._capture_setting = None
+        self._maybe_fetch_capture_setting()
+
+    def _toggle_demo_mode(self, enabled):
+        """Screenshot-mode toggle: anonymize contacts + rooms, mask URL,
+        clear output, fake contact count (10–40).
+
+        URL masking is driven by `self._demo_mode` inside `update_state`
+        (which runs every 500ms), so the mask survives state ticks.
+        """
+        self._demo_mode = enabled
+        if enabled:
+            self.output_text.clear()
+        if hasattr(self, "contacts_panel"):
+            self.contacts_panel.set_demo_mode(enabled)
+        # Rooms: labels read `self._demo_mode` inside `_load_rooms`.
+        self._load_rooms()
+        # Re-run state logic so URL gets (un)masked immediately.
+        self.update_state()
+
+    # ------------------------------------------------------------ Login flow
+
+    def _start_signin(self):
+        self._awaiting_auth_code = True
+        self.run_command("tuple login")
+        self.rebuild_actions()
+
+    def _cancel_signin(self):
+        self._awaiting_auth_code = False
+        self.rebuild_actions()
+
+    def _submit_auth_code(self):
+        code = self.auth_code_input.text().strip() if hasattr(self, "auth_code_input") else ""
+        if not code:
+            QMessageBox.warning(self, "Input Required", "Please paste the auth code.")
+            return
+        self._awaiting_auth_code = False
+        # Basic shell-safety: quote the code
+        self.run_command(f'tuple auth "{code}"')
+        # The log file will flip is_logged_in on next tick.
+        self.rebuild_actions()
+
+    # --------------------------------------------------------- Commands
 
     def run_command(self, command):
-        """Run a tuple command in a separate thread"""
         if self.current_thread and self.current_thread.isRunning():
             QMessageBox.warning(
-                self,
-                "Command Running",
-                "A command is already running. Please wait for it to complete."
+                self, "Command Running",
+                "A command is already running. Please wait for it to complete.",
             )
             return
 
-        self.log_output(f"$ {command}\n", False)
-
+        self._pending_command = command
+        self._log_output(f"$ {command}\n", False)
         self.current_thread = CommandThread(command)
-        self.current_thread.output_ready.connect(self.handle_output)
+        self.current_thread.output_ready.connect(self._handle_output)
         self.current_thread.start()
 
-    def handle_output(self, output, is_error):
-        """Handle command output"""
-        self.log_output(output, is_error)
-        # Update state immediately after command completes
+    def _handle_output(self, output, is_error):
+        self._log_output(output, is_error)
+        self.state.ingest_command_output(output)
+        # Track mute/share state from the CLI's own response. The log file
+        # only records CLI invocations and the daemon has no query command,
+        # so parsing the command output is the best confirmation we get.
+        # After `tuple mute` the CLI prints a confirmation containing
+        # "muted" (e.g. "muted your microphone"); likewise "unmuted",
+        # "shared", "unshared". Belt-and-braces: also trust the command we
+        # just dispatched (optimistic) since the daemon errors loudly on
+        # failure.
+        cmd = (self._pending_command or "").strip()
+        if not is_error and cmd:
+            text = (output or "").lower()
+            if cmd == "tuple mute" and "unmuted" not in text:
+                self.state.set_mute(True)
+            elif cmd == "tuple unmute":
+                self.state.set_mute(False)
+            elif cmd == "tuple share" and "unshared" not in text:
+                self.state.set_share(True)
+            elif cmd == "tuple unshare":
+                self.state.set_share(False)
+        # If `tuple ui` reports the native UI is already shown, close that
+        # existing process and re-invoke — user wants one click to bring it
+        # up, whether or not it was already running.
+        if cmd == "tuple ui" and "already shown" in (output or "").lower():
+            self._close_native_ui_and_retry()
+        self._pending_command = None
+        # Re-render immediately so mute/share toggle reflects the new state
+        # without a 500ms lag, then do the delayed re-read to catch any
+        # subsequent daemon-side changes (call ended, signaler dropped, etc.).
+        self.update_state()
         QTimer.singleShot(500, self.update_state)
 
-    def log_output(self, text, is_error=False):
-        """Log output to the text area"""
+    def _close_native_ui_and_retry(self):
+        """Close Tuple's native UI window, then re-invoke `tuple ui`.
+
+        The native UI window is owned by the `tuple on` daemon process
+        itself — there is no separate `tuple ui` process to SIGTERM (I
+        verified by running `tuple ui` and watching the process list —
+        only the daemon appears). So we close the window via the session's
+        window manager and ask the CLI to re-show it.
+
+        Strategies, tried in order:
+          - KDE/KWin (X11 or Wayland): load a short script via
+            `org.kde.kwin.Scripting` that calls closeWindow() on any
+            top-level whose caption is exactly "Tuple".
+          - X11 fallback: `wmctrl -c Tuple` if wmctrl is installed.
+        """
+        closed = self._close_tuple_window_kwin()
+        if not closed:
+            closed = self._close_tuple_window_wmctrl()
+
+        if closed:
+            # Give the window a moment to tear down before re-invoking.
+            QTimer.singleShot(500, lambda: self.run_command("tuple ui"))
+        else:
+            self._log_output(
+                "Native UI already shown, but couldn't locate the window to "
+                "close it. On KDE this requires KWin scripting via D-Bus; on "
+                "other X11 sessions install `wmctrl`.\n",
+                True,
+            )
+
+    def _close_tuple_window_kwin(self):
+        """Close the Tuple window via KWin's scripting D-Bus API.
+
+        Match by resourceClass rather than caption: live testing showed the
+        Tuple window's caption is often empty ("") while resourceClass is
+        reliably "Tuple" (and resourceName is "tuple-main").
+        """
+        if "KDE" not in os.environ.get("XDG_CURRENT_DESKTOP", ""):
+            return False
+        import tempfile
+        script_path = None
+        try:
+            # KWin 5 exposes workspace.clientList(); KWin 6 renamed it to
+            # workspace.windowList(). Try both so this keeps working across
+            # Plasma upgrades.
+            script = (
+                "const wins = (typeof workspace.windowList === 'function'"
+                "  ? workspace.windowList()"
+                "  : workspace.clientList());"
+                "for (const w of wins) {"
+                "  if ((w.resourceClass || '').toString() === 'Tuple') {"
+                "    w.closeWindow();"
+                "  }"
+                "}"
+            )
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".js", delete=False,
+            ) as f:
+                f.write(script)
+                script_path = f.name
+
+            load = subprocess.run(
+                ["gdbus", "call", "--session",
+                 "--dest", "org.kde.KWin",
+                 "--object-path", "/Scripting",
+                 "--method", "org.kde.kwin.Scripting.loadScript", script_path],
+                capture_output=True, text=True, timeout=3,
+            )
+            if load.returncode != 0:
+                return False
+            import re as _re
+            m = _re.search(r"\d+", load.stdout or "")
+            if not m:
+                return False
+            script_id = m.group(0)
+            run = subprocess.run(
+                ["gdbus", "call", "--session",
+                 "--dest", "org.kde.KWin",
+                 "--object-path", f"/Scripting/Script{script_id}",
+                 "--method", "org.kde.kwin.Script.run"],
+                capture_output=True, text=True, timeout=3,
+            )
+            return run.returncode == 0
+        except FileNotFoundError:
+            # gdbus not installed.
+            return False
+        except Exception as e:
+            self._log_output(f"KWin close attempt failed: {e}\n", True)
+            return False
+        finally:
+            if script_path:
+                try:
+                    os.unlink(script_path)
+                except OSError:
+                    pass
+
+    def _close_tuple_window_wmctrl(self):
+        """Fallback: close by caption via wmctrl (X11 sessions only)."""
+        try:
+            result = subprocess.run(
+                ["wmctrl", "-c", "Tuple"],
+                capture_output=True, text=True, timeout=3,
+            )
+            return result.returncode == 0
+        except FileNotFoundError:
+            return False
+        except Exception:
+            return False
+
+    def _log_output(self, text, is_error=False):
         if is_error:
-            self.output_text.append(f'<span style="color: red;">{text}</span>')
+            self.output_text.append(f'<span style="color: {DANGER};">{text}</span>')
         else:
             self.output_text.append(text)
-        self.output_text.ensureCursorVisible()
+        # `ensureCursorVisible` only scrolls enough to reveal the cursor,
+        # which can leave a gap below the last line. Pin to the scroll max
+        # so the newest output is always flush with the bottom edge.
+        sb = self.output_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _join_call(self):
+        url = self.call_url_input.text().strip() if hasattr(self, "call_url_input") else ""
+        if not url:
+            QMessageBox.warning(self, "Input Required", "Please enter a call URL.")
+            return
+        self.run_command(f"tuple join {url}")
+
+    def _copy_personal_url(self):
+        url = self.personal_url_input.text()
+        if url:
+            QApplication.clipboard().setText(url)
+            self._log_output("URL copied to clipboard!\n", False)
+
+    # ------------------------------------------------------------ State sync
 
     def update_state(self):
-        """Update state from log file and refresh UI"""
         previous_in_call = self.state.in_call
         self.state.update()
 
-        # Show window when entering a call (so user can copy URL)
         if not previous_in_call and self.state.in_call:
             self.show()
             self.activateWindow()
-            self.show_action.setText("Hide Window")
+            if hasattr(self, "show_action"):
+                self.show_action.setText("Hide Window")
 
-        # Update login status
-        if self.state.is_logged_in:
-            self.login_status_label.setText("✓ Logged In")
-            self.login_status_label.setStyleSheet("color: green;")
+        # Header text
+        if not self.state.is_logged_in:
+            header = "Signed Out"
+        elif not self.state.daemon_running:
+            header = "Daemon Off"
+        elif self.state.in_call:
+            header = "In Call"
         else:
-            self.login_status_label.setText("✗ Not Logged In")
-            self.login_status_label.setStyleSheet("color: red;")
+            header = "Ready"
+        self.state_header.setText(header)
 
-        # Update daemon status
-        if self.state.daemon_running:
-            self.daemon_status_label.setText("✓ Daemon Running")
-            self.daemon_status_label.setStyleSheet("color: green;")
-        else:
-            self.daemon_status_label.setText("✗ Daemon Off")
-            self.daemon_status_label.setStyleSheet("color: gray;")
-
-        # Update connection status
-        if self.state.signaler_state == "connected":
-            self.connection_status_label.setText("✓ Connected")
-            self.connection_status_label.setStyleSheet("color: green;")
-        elif self.state.signaler_state in ["connecting", "synchronizing"]:
-            self.connection_status_label.setText(f"{self.state.signaler_state.title()}")
-            self.connection_status_label.setStyleSheet("color: orange;")
-        else:
-            self.connection_status_label.setText(f"{self.state.signaler_state.title()}")
-            self.connection_status_label.setStyleSheet("color: gray;")
-
-        # Update call status
-        if self.state.in_call:
-            self.call_status_label.setText("✓ In Call")
-            self.call_status_label.setStyleSheet("color: green;")
-        else:
-            self.call_status_label.setText("No Call")
-            self.call_status_label.setStyleSheet("color: gray;")
-
-        # Update mute status (only when in call)
-        if self.state.in_call:
-            if self.state.is_muted:
-                self.mute_status_label.setText("🔇 Muted")
-                self.mute_status_label.setStyleSheet("color: red;")
+        # Personal URL visibility — only show when we actually have one.
+        # (Recent Tuple versions don't log the slug, so we may never capture it
+        #  from the log file. In that case we keep the panel hidden rather than
+        #  showing an empty box.)
+        ready_not_in_call = (
+            self.state.is_logged_in and self.state.daemon_running and not self.state.in_call
+        )
+        have_url = bool(self.state.personal_url)
+        self.url_panel.setVisible(ready_not_in_call and have_url)
+        if have_url:
+            if self._demo_mode:
+                self.personal_url_input.setText("https://tuple.app/j/••••••••")
             else:
-                self.mute_status_label.setText("🎤 Unmuted")
-                self.mute_status_label.setStyleSheet("color: green;")
-        else:
-            self.mute_status_label.setText("Mic: N/A")
-            self.mute_status_label.setStyleSheet("color: gray;")
+                self.personal_url_input.setText(self.state.personal_url)
 
-        # Update personal URL and copy button
-        if self.state.personal_url:
-            self.personal_url_label.setText(self.state.personal_url)
-            self.personal_url_label.setPlaceholderText("Personal URL")
-            self.copy_url_btn.setVisible(True)
-        else:
-            self.personal_url_label.setText("")
-            self.personal_url_label.setPlaceholderText("No URL")
-            self.copy_url_btn.setVisible(False)
+        # Rooms / contacts visibility
+        ready = self.state.is_logged_in and self.state.daemon_running
+        self.rooms_group.setVisible(ready)
+        self.contacts_group.setVisible(ready)
 
-        # Rebuild action area based on state
+        # Auto-populate contacts the first time they become viewable.
+        if ready and not self._contacts_loaded:
+            self._contacts_loaded = True
+            QTimer.singleShot(0, self.contacts_panel.refresh)
+
+        # Footer summary
+        sig = self.state.signaler_state.title() if self.state.signaler_state != "unknown" else "—"
+        if self.state.is_logged_in and self.state.daemon_running:
+            footer = f"Signaler: {sig} · Daemon running"
+        elif self.state.is_logged_in:
+            footer = "Signaler: — · Daemon off"
+        else:
+            footer = "Not signed in"
+        self.footer_label.setText(footer)
+
+        # Header color hint
+        if self.state.in_call:
+            self.state_header.setStyleSheet(f"color: {SUCCESS};")
+        elif not self.state.is_logged_in or not self.state.daemon_running:
+            self.state_header.setStyleSheet(f"color: {TEXT_MUTED};")
+        else:
+            self.state_header.setStyleSheet("")
+
+        # Account menu: Sign In/Out visibility
+        self.account_signin_action.setVisible(not self.state.is_logged_in)
+        self.account_signout_action.setVisible(self.state.is_logged_in)
+
         self.rebuild_actions()
+        self._update_tray_icon()
 
-        # Update tray icon
-        self.update_tray_icon()
+        # Cache capture setting lazily so in-call share sidecar can use it.
+        self._maybe_fetch_capture_setting()
 
-    def rebuild_actions(self):
-        """Rebuild the action area to show only relevant buttons"""
-        # Clear current layout
-        while self.action_layout.count():
-            item = self.action_layout.takeAt(0)
-            if item.widget():
-                item.widget().setParent(None)
-            elif item.layout():
-                # Remove sublayout items
-                while item.layout().count():
-                    subitem = item.layout().takeAt(0)
-                    if subitem.widget():
-                        subitem.widget().setParent(None)
-
-        daemon_running = self.state.daemon_running
-        in_call = self.state.in_call
-
-        # State 1: Daemon not running - only show start button
-        if not daemon_running:
-            self.action_layout.addWidget(self.daemon_start_btn)
-            self.action_layout.addStretch()
+    def _maybe_fetch_capture_setting(self):
+        if self._capture_setting is not None:
             return
-
-        # State 2: Daemon running but not in call - show call options
-        if daemon_running and not in_call:
-            self.action_layout.addWidget(self.call_url_input)
-            self.action_layout.addWidget(self.join_btn)
-            self.action_layout.addWidget(self.new_btn)
-            self.action_layout.addWidget(self.daemon_stop_btn)
-            self.action_layout.addStretch()
+        if not (self.state.is_logged_in and self.state.daemon_running):
             return
-
-        # State 3: In a call - show call controls
-        if in_call:
-            # Update share button text and action based on state
-            if self.state.is_sharing:
-                self.share_toggle_btn.setText("Unshare Screen")
-                try:
-                    self.share_toggle_btn.clicked.disconnect()
-                except:
-                    pass
-                self.share_toggle_btn.clicked.connect(lambda: self.run_command("tuple unshare"))
-            else:
-                self.share_toggle_btn.setText("Share Screen")
-                try:
-                    self.share_toggle_btn.clicked.disconnect()
-                except:
-                    pass
-                self.share_toggle_btn.clicked.connect(lambda: self.run_command("tuple share"))
-            self.action_layout.addWidget(self.share_toggle_btn)
-
-            # Update mute button text and action based on state
-            if self.state.is_muted:
-                self.mute_toggle_btn.setText("Unmute")
-                try:
-                    self.mute_toggle_btn.clicked.disconnect()
-                except:
-                    pass
-                self.mute_toggle_btn.clicked.connect(lambda: self.run_command("tuple unmute"))
-            else:
-                self.mute_toggle_btn.setText("Mute")
-                try:
-                    self.mute_toggle_btn.clicked.disconnect()
-                except:
-                    pass
-                self.mute_toggle_btn.clicked.connect(lambda: self.run_command("tuple mute"))
-            self.action_layout.addWidget(self.mute_toggle_btn)
-
-            # End call button in same position as New Call button
-            self.action_layout.addWidget(self.end_btn)
-
-            self.action_layout.addWidget(self.daemon_stop_btn)
-            self.action_layout.addStretch()
+        settings, error = fetch_settings()
+        if error:
             return
+        for s in settings:
+            if s["name"] == "capture":
+                self._capture_setting = s["value"]
+                break
 
-    def create_tray_icon(self):
-        """Create a dynamic tray icon based on current state"""
-        from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen
-        from PyQt6.QtCore import Qt as QtCore
+    def _load_tuple_icon(self, size):
+        return load_tuple_icon(size)
 
+    # --------------------------------------------------------- Tray icon
+
+    def _create_tray_pixmap(self):
         size = 64
         pixmap = QPixmap(size, size)
-        pixmap.fill(QtCore.GlobalColor.transparent)
+        pixmap.fill(Qt.GlobalColor.transparent)
 
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Determine color and state based on current status
         if not self.state.daemon_running:
-            # Gray: Daemon off
             color = QColor(128, 128, 128)
             text = ""
         elif self.state.in_call:
             if self.state.is_muted:
-                # Red: In call but muted
                 color = QColor(220, 50, 50)
                 text = "M"
             else:
-                # Green: In call and unmuted
                 color = QColor(50, 200, 80)
                 text = ""
         else:
-            # Blue: Daemon on but not in call
-            color = QColor(60, 140, 220)
+            color = QColor(139, 95, 191)  # accent
             text = ""
 
-        # Draw main circle
         painter.setBrush(color)
         painter.setPen(QPen(QColor(255, 255, 255, 180), 2))
         painter.drawEllipse(8, 8, 48, 48)
 
-        # Add text overlay if needed (for mute indicator)
         if text:
             painter.setPen(QColor(255, 255, 255))
             font = painter.font()
             font.setPointSize(24)
             font.setBold(True)
             painter.setFont(font)
-            painter.drawText(pixmap.rect(), QtCore.AlignmentFlag.AlignCenter, text)
+            painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, text)
 
-        # Add small indicator for screen sharing (orange dot in corner)
         if self.state.is_sharing:
             painter.setBrush(QColor(255, 140, 0))
             painter.setPen(QPen(QColor(255, 255, 255), 2))
             painter.drawEllipse(42, 42, 16, 16)
 
         painter.end()
-
         return QIcon(pixmap)
 
-    def setup_tray_icon(self):
-        """Set up system tray icon with menu"""
-        # Create tray icon
+    def _setup_tray_icon(self):
         self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(self._create_tray_pixmap())
 
-        # Set initial icon
-        self.tray_icon.setIcon(self.create_tray_icon())
-
-        # Create tray menu
         self.tray_menu = QMenu()
 
-        # Show/Hide window action
         self.show_action = QAction("Show Window", self)
-        self.show_action.triggered.connect(self.toggle_window)
+        self.show_action.triggered.connect(self._toggle_window)
         self.tray_menu.addAction(self.show_action)
 
-        # Show Tuple UI action
-        self.show_tuple_ui_action = QAction("Show Tuple UI", self)
-        self.show_tuple_ui_action.triggered.connect(self.show_tuple_ui)
-        self.tray_menu.addAction(self.show_tuple_ui_action)
+        show_native = QAction("Show Native Tuple UI", self)
+        show_native.triggered.connect(lambda: self.run_command("tuple ui"))
+        self.tray_menu.addAction(show_native)
 
         self.tray_menu.addSeparator()
 
-        # Status section (will be updated dynamically)
-        self.status_action = QAction("Status: Unknown", self)
+        self.status_action = QAction("Status: —", self)
         self.status_action.setEnabled(False)
         self.tray_menu.addAction(self.status_action)
 
         self.tray_menu.addSeparator()
 
-        # Quick actions
         self.tray_daemon_action = QAction("Start Daemon", self)
-        self.tray_daemon_action.triggered.connect(self.tray_toggle_daemon)
+        self.tray_daemon_action.triggered.connect(self._tray_toggle_daemon)
         self.tray_menu.addAction(self.tray_daemon_action)
 
-        self.tray_join_call_action = QAction("Join Call...", self)
-        self.tray_join_call_action.triggered.connect(self.tray_join_call)
+        self.tray_join_call_action = QAction("Join Call…", self)
+        self.tray_join_call_action.triggered.connect(self._tray_join_call)
         self.tray_menu.addAction(self.tray_join_call_action)
 
         self.tray_new_call_action = QAction("New Call", self)
         self.tray_new_call_action.triggered.connect(lambda: self.run_command("tuple new"))
         self.tray_menu.addAction(self.tray_new_call_action)
 
-        self.tray_end_call_action = QAction("End Call", self)
+        self.tray_end_call_action = QAction("Hang Up", self)
         self.tray_end_call_action.triggered.connect(lambda: self.run_command("tuple end"))
         self.tray_menu.addAction(self.tray_end_call_action)
 
         self.tray_mute_action = QAction("Mute", self)
-        self.tray_mute_action.triggered.connect(self.tray_toggle_mute)
+        self.tray_mute_action.triggered.connect(self._tray_toggle_mute)
         self.tray_menu.addAction(self.tray_mute_action)
 
         self.tray_share_action = QAction("Share Screen", self)
-        self.tray_share_action.triggered.connect(self.tray_toggle_share)
+        self.tray_share_action.triggered.connect(self._tray_toggle_share)
         self.tray_menu.addAction(self.tray_share_action)
 
         self.tray_menu.addSeparator()
+        # Rooms injected dynamically before Quit.
 
-        # Rooms will be added here dynamically during update_tray_icon()
+        self.tray_settings_action = QAction("Settings…", self)
+        self.tray_settings_action.triggered.connect(self._open_settings)
+        self.tray_menu.addAction(self.tray_settings_action)
 
-        # Quit action
-        quit_action = QAction("Quit", self)
-        quit_action.triggered.connect(self.quit_application)
-        self.tray_menu.addAction(quit_action)
+        self.tray_quit_action = QAction("Quit", self)
+        self.tray_quit_action.triggered.connect(self.quit_application)
+        self.tray_menu.addAction(self.tray_quit_action)
 
-        # Set the menu
         self.tray_icon.setContextMenu(self.tray_menu)
-
-        # Connect double-click to show/hide window
-        self.tray_icon.activated.connect(self.tray_icon_activated)
-
-        # Show the tray icon
+        self.tray_icon.activated.connect(self._tray_activated)
         self.tray_icon.show()
 
-        # Show startup notification
         self.tray_icon.showMessage(
             "Tuple UI",
             "Running in tray. Left-click to mute, right-click for menu.",
-            QSystemTrayIcon.MessageIcon.Information,
-            3000
+            QSystemTrayIcon.MessageIcon.Information, 3000,
         )
 
-    def update_tray_icon(self):
-        """Update tray icon tooltip and menu based on current state"""
-        # Update the icon itself based on state
-        self.tray_icon.setIcon(self.create_tray_icon())
+    def _update_tray_icon(self):
+        self.tray_icon.setIcon(self._create_tray_pixmap())
 
-        # Update show/hide action text based on actual window visibility
         if self.isVisible():
             self.show_action.setText("Hide Window")
         else:
             self.show_action.setText("Show Window")
 
-        # Build status summary for tooltip
-        status_parts = []
-
-        if self.state.is_logged_in:
-            status_parts.append("Logged In")
-        else:
-            status_parts.append("Not Logged In")
-
-        if self.state.daemon_running:
-            status_parts.append("Daemon: ON")
-        else:
-            status_parts.append("Daemon: OFF")
-
+        parts = []
+        parts.append("Signed In" if self.state.is_logged_in else "Signed Out")
+        parts.append("Daemon ON" if self.state.daemon_running else "Daemon OFF")
         if self.state.in_call:
-            status_parts.append("IN CALL")
+            parts.append("IN CALL")
             if self.state.is_muted:
-                status_parts.append("(Muted)")
+                parts.append("(Muted)")
             if self.state.is_sharing:
-                status_parts.append("(Sharing)")
+                parts.append("(Sharing)")
         else:
             if self.state.signaler_state == "connected":
-                status_parts.append("Connected")
+                parts.append("Connected")
             elif self.state.signaler_state in ["connecting", "synchronizing"]:
-                status_parts.append(self.state.signaler_state.title())
+                parts.append(self.state.signaler_state.title())
+        self.tray_icon.setToolTip("Tuple — " + " | ".join(parts))
+        self.status_action.setText("Status: " + " | ".join(parts[:2]))
 
-        tooltip = "Tuple - " + " | ".join(status_parts)
-        self.tray_icon.setToolTip(tooltip)
-
-        # Update status action in menu
-        self.status_action.setText("Status: " + " | ".join(status_parts[:2]))
-
-        # Update daemon action
+        # Daemon action
         if self.state.daemon_running:
             self.tray_daemon_action.setText("Stop Daemon")
-            self.tray_daemon_action.setEnabled(True)
         else:
             self.tray_daemon_action.setText("Start Daemon")
-            self.tray_daemon_action.setEnabled(True)
 
-        # Update call actions
         if self.state.daemon_running and not self.state.in_call:
             self.tray_join_call_action.setVisible(True)
-            self.tray_join_call_action.setEnabled(True)
             self.tray_new_call_action.setVisible(True)
-            self.tray_new_call_action.setEnabled(True)
             self.tray_end_call_action.setVisible(False)
             self.tray_mute_action.setVisible(False)
             self.tray_share_action.setVisible(False)
@@ -944,23 +1090,12 @@ class TupleUI(QMainWindow):
             self.tray_join_call_action.setVisible(False)
             self.tray_new_call_action.setVisible(False)
             self.tray_end_call_action.setVisible(True)
-            self.tray_end_call_action.setEnabled(True)
-
-            # Update mute action
             self.tray_mute_action.setVisible(True)
-            self.tray_mute_action.setEnabled(True)
-            if self.state.is_muted:
-                self.tray_mute_action.setText("Unmute")
-            else:
-                self.tray_mute_action.setText("Mute")
-
-            # Update share action
+            self.tray_mute_action.setText("Unmute" if self.state.is_muted else "Mute")
             self.tray_share_action.setVisible(True)
-            self.tray_share_action.setEnabled(True)
-            if self.state.is_sharing:
-                self.tray_share_action.setText("Unshare Screen")
-            else:
-                self.tray_share_action.setText("Share Screen")
+            self.tray_share_action.setText(
+                "Unshare Screen" if self.state.is_sharing else "Share Screen"
+            )
         else:
             self.tray_join_call_action.setVisible(False)
             self.tray_new_call_action.setVisible(False)
@@ -968,47 +1103,39 @@ class TupleUI(QMainWindow):
             self.tray_mute_action.setVisible(False)
             self.tray_share_action.setVisible(False)
 
-        # Update rooms in tray menu
-        # Find and remove existing room actions (added after share action)
+        # Rebuild room actions: they live between share_action and settings_action.
         actions = self.tray_menu.actions()
-        share_idx = actions.index(self.tray_share_action) if self.tray_share_action in actions else -1
-        if share_idx >= 0:
-            # Remove old room actions and separators after share action
-            while share_idx + 1 < len(self.tray_menu.actions()):
-                action = self.tray_menu.actions()[share_idx + 1]
-                if action != self.tray_menu.actions()[-1]:  # Don't remove quit action
-                    self.tray_menu.removeAction(action)
-                else:
-                    break
-
-        # Add room actions with separators
+        try:
+            start = actions.index(self.tray_share_action) + 1
+            end = actions.index(self.tray_settings_action)
+        except ValueError:
+            return
+        # Remove existing room entries (and their leading separator).
+        for act in actions[start:end]:
+            self.tray_menu.removeAction(act)
         rooms = self.button_config.get_buttons()
         if rooms:
-            self.tray_menu.insertSeparator(self.tray_menu.actions()[-1])
+            sep = self.tray_menu.insertSeparator(self.tray_settings_action)
             for name, url in rooms:
-                action = QAction(name, self)
-                action.triggered.connect(lambda checked, u=url: self.run_command(f"tuple join {u}"))
-                self.tray_menu.insertAction(self.tray_menu.actions()[-1], action)
-            self.tray_menu.insertSeparator(self.tray_menu.actions()[-1])
+                a = QAction(name, self)
+                a.triggered.connect(lambda checked=False, u=url: self.run_command(f"tuple join {u}"))
+                self.tray_menu.insertAction(self.tray_settings_action, a)
 
-    def tray_icon_activated(self, reason):
-        """Handle tray icon activation (clicks)"""
+    # --------------------------------------------------- Tray interactions
+
+    def _tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            # Left click - toggle mute if in a call
             if self.state.in_call:
-                self.tray_toggle_mute()
+                self._tray_toggle_mute()
             else:
                 self.tray_icon.showMessage(
-                    "Tuple UI",
-                    "Not in a call - cannot toggle mute",
-                    QSystemTrayIcon.MessageIcon.Warning,
-                    2000
+                    "Tuple UI", "Not in a call - cannot toggle mute",
+                    QSystemTrayIcon.MessageIcon.Warning, 2000,
                 )
         elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self.toggle_window()
+            self._toggle_window()
 
-    def toggle_window(self):
-        """Show or hide the main window"""
+    def _toggle_window(self):
         if self.isVisible():
             self.hide()
             self.show_action.setText("Show Window")
@@ -1017,74 +1144,166 @@ class TupleUI(QMainWindow):
             self.activateWindow()
             self.show_action.setText("Hide Window")
 
-    def show_tuple_ui(self):
-        """Run tuple ui command to show the native Tuple UI"""
-        self.run_command("tuple ui")
-
-    def tray_toggle_daemon(self):
-        """Toggle daemon from tray menu"""
+    def _tray_toggle_daemon(self):
         if self.state.daemon_running:
             self.run_command("tuple off")
         else:
             self.run_command("tuple on")
 
-    def tray_toggle_mute(self):
-        """Toggle mute from tray menu"""
+    def _tray_toggle_mute(self):
         if self.state.is_muted:
             self.run_command("tuple unmute")
         else:
             self.run_command("tuple mute")
 
-    def tray_toggle_share(self):
-        """Toggle screen sharing from tray menu"""
+    def _tray_toggle_share(self):
         if self.state.is_sharing:
             self.run_command("tuple unshare")
         else:
             self.run_command("tuple share")
 
-    def tray_join_call(self):
-        """Show dialog to join a call from tray menu"""
-        from PyQt6.QtWidgets import QInputDialog
-
-        call_url, ok = QInputDialog.getText(
-            None,
-            "Join Call",
-            "Enter call URL:",
-            QLineEdit.EchoMode.Normal,
-            ""
+    def _tray_join_call(self):
+        url, ok = QInputDialog.getText(
+            self, "Join Call", "Enter call URL:", QLineEdit.EchoMode.Normal, "",
         )
+        if ok and url.strip():
+            self.run_command(f"tuple join {url.strip()}")
 
-        if ok and call_url.strip():
-            self.run_command(f"tuple join {call_url.strip()}")
+    # ---------------------------------------------------- Signals & quit
+
+    def _install_signal_handlers(self):
+        # Existing: SIGUSR1 = refresh state (used by toggle-tuple-mute helper)
+        signal.signal(signal.SIGUSR1, self._on_sigusr1)
+        # New: SIGUSR2 = show/raise window (used by second-instance launcher)
+        signal.signal(signal.SIGUSR2, self._on_sigusr2)
+        # SIGINT / SIGTERM: clean quit
+        signal.signal(signal.SIGINT, self._on_termination_signal)
+        signal.signal(signal.SIGTERM, self._on_termination_signal)
+        # Keep Python signals responsive while Qt event loop runs.
+        self._signal_tick = QTimer(self)
+        self._signal_tick.timeout.connect(lambda: None)
+        self._signal_tick.start(250)
+
+    def _on_sigusr1(self, signum, frame):
+        QTimer.singleShot(0, self.update_state)
+
+    def _on_sigusr2(self, signum, frame):
+        QTimer.singleShot(0, self._raise_to_foreground)
+
+    def _raise_to_foreground(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_termination_signal(self, signum, frame):
+        QTimer.singleShot(0, self.quit_application)
 
     def closeEvent(self, event: QCloseEvent):
-        """Handle window close event - minimize to tray instead of quitting"""
+        if self._quitting:
+            event.accept()
+            return
         if self.tray_icon.isVisible():
             self.hide()
             self.tray_icon.showMessage(
                 "Tuple UI",
-                "Application minimized to tray. Double-click to restore.",
-                QSystemTrayIcon.MessageIcon.Information,
-                2000
+                "Minimized to tray. Right-click the tray icon and choose Quit to exit.",
+                QSystemTrayIcon.MessageIcon.Information, 2000,
             )
             event.ignore()
         else:
             event.accept()
 
     def quit_application(self):
-        """Actually quit the application"""
-        self.tray_icon.hide()
+        if self._quitting:
+            return
+        self._quitting = True
+
+        try:
+            self.state_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._signal_tick.stop()
+        except Exception:
+            pass
+
+        thread = self.current_thread
+        if thread is not None and thread.isRunning():
+            try:
+                thread.cancel()
+            except Exception:
+                pass
+            thread.wait(2000)
+
+        try:
+            self.tray_icon.hide()
+        except Exception:
+            pass
+
         QApplication.quit()
 
+
+# ---------------------------------------------------------------------- main
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Tuple UI")
+    # Bind the Wayland app_id (and X11 WM_CLASS) to our desktop entry so the
+    # task list / Alt-Tab / Plasma taskmanager look up `tuple-ui.desktop` and
+    # use its `Icon=` for the task-list icon. Without this, the task list
+    # shows a generic "?" while the titlebar icon we set below works fine.
+    app.setDesktopFileName("tuple-ui")
+    # Desktop environments (Wayland, X11 taskbars, Alt-Tab) pick up the
+    # application-level icon; setting both it and each window's icon covers
+    # the places they diverge.
+    app.setWindowIcon(load_tuple_icon())
+    app.setQuitOnLastWindowClosed(False)
+    apply_dark_theme(app)
 
-    window = TupleUI()
-    # Don't show window on startup - start in tray only
-    # User can double-click tray icon to show window
-    # window.show()
+    # Single-instance guard. If the lock exists but its owning PID is dead
+    # we treat it as stale and remove the file directly (Qt's own staleness
+    # check can be flaky), then retry.
+    LOCK_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(LOCK_FILE_PATH))
+    lock.setStaleLockTime(0)
+
+    if not lock.tryLock(100):
+        ok, pid, hostname, appname = lock.getLockInfo()
+        pid_alive = False
+        if ok and pid:
+            try:
+                os.kill(int(pid), 0)  # signal 0 = liveness probe, no effect
+                pid_alive = True
+            except (ProcessLookupError, PermissionError, OSError):
+                pid_alive = False
+
+        if pid_alive:
+            try:
+                os.kill(int(pid), signal.SIGUSR2)
+                print(f"Another tuple-ui is running (pid {pid}); raised its window.")
+            except Exception as e:
+                print(f"Another tuple-ui is running (pid {pid}); could not signal it: {e}")
+            sys.exit(0)
+
+        # No live holder — clear the lock file (Qt API first, then filesystem).
+        try:
+            lock.removeStaleLockFile()
+        except Exception:
+            pass
+        try:
+            LOCK_FILE_PATH.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"Could not remove stale lock file {LOCK_FILE_PATH}: {e}")
+        if not lock.tryLock(100):
+            print("Could not acquire tuple-ui lock after clearing stale lock.")
+            sys.exit(1)
+
+    window = TupleUI()  # noqa: F841 — kept alive by Qt
+    if window.prefs.show_on_start:
+        window.show()
+    app.aboutToQuit.connect(lambda: lock.unlock())
 
     sys.exit(app.exec())
 

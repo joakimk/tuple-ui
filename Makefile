@@ -7,17 +7,17 @@ restart:
 
 install:
 	pip3 install -e .
-	mkdir -p ~/.local/share/icons/hicolor/256x256/apps
 	mkdir -p ~/.local/share/applications
-	python3 -c "import urllib.request; urllib.request.urlretrieve('https://tuple.app/favicon.ico', '$(HOME)/.local/share/icons/hicolor/256x256/apps/tuple-ui.ico')" || echo "Warning: Could not download icon, continuing without it"
 	cp tuple-ui.desktop ~/.local/share/applications/
+	update-desktop-database ~/.local/share/applications 2>/dev/null || true
 	@echo "Installation complete! You can now run 'tuple-ui' from anywhere."
-	@echo "The app will appear in your applications menu."
+	@echo "The app will appear in your applications menu using the Tuple icon"
+	@echo "(reuses the 'tuple' hicolor icon installed by the Tuple CLI)."
 
 uninstall:
 	pip3 uninstall -y tuple-ui
-	rm -f ~/.local/share/icons/hicolor/256x256/apps/tuple-ui.ico
 	rm -f ~/.local/share/applications/tuple-ui.desktop
+	update-desktop-database ~/.local/share/applications 2>/dev/null || true
 	@echo "Uninstall complete."
 
 help:

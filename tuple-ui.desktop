@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Tuple UI
+Comment=System tray application for controlling Tuple pair programming
+Exec=tuple-ui
+Icon=tuple
+Categories=Utility;Development;
+Terminal=false
+StartupNotify=true
+StartupWMClass=tuple-ui

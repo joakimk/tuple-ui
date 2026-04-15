@@ -14,7 +14,15 @@ setup(
     long_description_content_type="text/markdown",
     author="Joakim",
     license="MIT",
-    py_modules=["tuple_ui"],
+    py_modules=[
+        "tuple_ui",
+        "tuple_ui_core",
+        "tuple_ui_rooms",
+        "tuple_ui_contacts",
+        "tuple_ui_settings",
+        "tuple_ui_prefs",
+        "tuple_ui_theme",
+    ],
     install_requires=[
         "PyQt6>=6.0.0",
     ],
