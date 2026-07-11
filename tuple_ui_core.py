@@ -10,6 +10,17 @@ from PyQt6.QtCore import QThread, pyqtSignal
 # Personal URL may show up in command output (e.g. `tuple new` prints it).
 TUPLE_URL_RE = re.compile(r"https?://tuple\.app/[A-Za-z0-9._\-/]+")
 
+# Anchored allowlist for URLs that get interpolated into shell commands
+# (run_command uses shell=True). Because it is anchored ^...$ and the character
+# class excludes every shell metacharacter (space ; | & $ ` " ' ( ) < > etc.),
+# a malicious "call URL" like `x; rm -rf ~` can never reach the shell.
+SAFE_TUPLE_URL_RE = re.compile(r"^https://tuple\.app/[A-Za-z0-9._/-]+$")
+
+
+def is_safe_tuple_url(url):
+    """True if `url` is a well-formed tuple.app URL safe to pass to a shell."""
+    return bool(SAFE_TUPLE_URL_RE.match((url or "").strip()))
+
 
 class TupleState:
     """Parses and stores Tuple state from the CLI log file."""

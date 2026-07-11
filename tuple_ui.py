@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
 )
 
 from tuple_ui_contacts import ContactsPanel
-from tuple_ui_core import CommandThread, TupleState
+from tuple_ui_core import CommandThread, TupleState, is_safe_tuple_url
 from tuple_ui_prefs import UIPrefs
 from tuple_ui_rooms import FastButtonConfig
 from tuple_ui_settings import SettingsDialog, fetch_settings
@@ -612,7 +612,7 @@ class TupleUI(QMainWindow):
             btn = QPushButton(label)
             btn.setToolTip(tooltip)
             btn.setMinimumHeight(26)
-            btn.clicked.connect(lambda checked=False, u=url: self.run_command(f"tuple join {u}"))
+            btn.clicked.connect(lambda checked=False, u=url: self._safe_join(u))
             self.rooms_container_layout.addWidget(btn)
 
     def _open_settings(self):
@@ -833,12 +833,26 @@ class TupleUI(QMainWindow):
         sb = self.output_text.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    def _safe_join(self, url):
+        """Validate a tuple.app URL before it reaches the shell (run_command
+        uses shell=True). Rejects anything with shell metacharacters, closing
+        the command-injection vector on pasted or saved call URLs."""
+        url = (url or "").strip()
+        if not is_safe_tuple_url(url):
+            QMessageBox.warning(
+                self, "Invalid Call URL",
+                "That does not look like a valid Tuple call URL "
+                "(expected https://tuple.app/…). Refusing to run it.",
+            )
+            return
+        self.run_command(f"tuple join {url}")
+
     def _join_call(self):
         url = self.call_url_input.text().strip() if hasattr(self, "call_url_input") else ""
         if not url:
             QMessageBox.warning(self, "Input Required", "Please enter a call URL.")
             return
-        self.run_command(f"tuple join {url}")
+        self._safe_join(url)
 
     def _copy_personal_url(self):
         url = self.personal_url_input.text()
@@ -1118,7 +1132,7 @@ class TupleUI(QMainWindow):
             sep = self.tray_menu.insertSeparator(self.tray_settings_action)
             for name, url in rooms:
                 a = QAction(name, self)
-                a.triggered.connect(lambda checked=False, u=url: self.run_command(f"tuple join {u}"))
+                a.triggered.connect(lambda checked=False, u=url: self._safe_join(u))
                 self.tray_menu.insertAction(self.tray_settings_action, a)
 
     # --------------------------------------------------- Tray interactions
@@ -1167,7 +1181,7 @@ class TupleUI(QMainWindow):
             self, "Join Call", "Enter call URL:", QLineEdit.EchoMode.Normal, "",
         )
         if ok and url.strip():
-            self.run_command(f"tuple join {url.strip()}")
+            self._safe_join(url)
 
     # ---------------------------------------------------- Signals & quit
 
