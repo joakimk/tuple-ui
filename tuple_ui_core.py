@@ -1,6 +1,7 @@
 """Core helpers for Tuple UI: log-file state parsing and subprocess thread."""
 
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -9,6 +10,32 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 # Personal URL may show up in command output (e.g. `tuple new` prints it).
 TUPLE_URL_RE = re.compile(r"https?://tuple\.app/[A-Za-z0-9._\-/]+")
+
+# Tuple CLI commands (v2026_10+ layout). `new`, `share`, `unshare` and `ui`
+# are deprecated upstream but still work and have no replacement yet.
+CMD_START = "tuple start"
+CMD_STOP = "tuple stop"
+CMD_NEW_CALL = "tuple new"
+CMD_LEAVE_CALL = "tuple call leave"
+CMD_MUTE = "tuple call mute"
+CMD_UNMUTE = "tuple call unmute"
+CMD_SHARE = "tuple share"
+CMD_UNSHARE = "tuple unshare"
+CMD_NATIVE_UI = "tuple ui"
+CMD_LOGIN = "tuple login"
+CMD_LOGOUT = "tuple logout"
+
+
+def join_call_cmd(url):
+    return f"tuple call join {shlex.quote(url)}"
+
+
+def start_call_cmd(person):
+    return f"tuple call start {shlex.quote(person)}"
+
+
+def auth_cmd(code):
+    return f"tuple auth {shlex.quote(code)}"
 
 
 class TupleState:
@@ -118,7 +145,7 @@ class TupleState:
                     self.is_sharing = True
                 elif cmd == "unshare":
                     self.is_sharing = False
-                elif cmd == "off":
+                elif cmd in ("off", "stop"):
                     daemon_stopped = True
                     daemon_started = False
                     self.signaler_state = "disconnected"

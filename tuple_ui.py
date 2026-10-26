@@ -16,7 +16,11 @@ from PyQt6.QtWidgets import (
 )
 
 from tuple_ui_contacts import ContactsPanel
-from tuple_ui_core import CommandThread, TupleState
+from tuple_ui_core import (
+    CMD_LEAVE_CALL, CMD_LOGIN, CMD_LOGOUT, CMD_MUTE, CMD_NATIVE_UI,
+    CMD_NEW_CALL, CMD_SHARE, CMD_START, CMD_STOP, CMD_UNMUTE, CMD_UNSHARE,
+    CommandThread, TupleState, auth_cmd, join_call_cmd,
+)
 from tuple_ui_prefs import UIPrefs
 from tuple_ui_rooms import FastButtonConfig
 from tuple_ui_settings import SettingsDialog, fetch_settings
@@ -163,7 +167,7 @@ class TupleUI(QMainWindow):
         self.native_ui_btn.setProperty("kind", "icon")
         self.native_ui_btn.setToolTip("Open native Tuple UI")
         self.native_ui_btn.setIcon(self._load_tuple_icon(18))
-        self.native_ui_btn.clicked.connect(lambda: self.run_command("tuple ui"))
+        self.native_ui_btn.clicked.connect(lambda: self.run_command(CMD_NATIVE_UI))
         header.addWidget(self.native_ui_btn)
 
         root.addLayout(header)
@@ -298,13 +302,13 @@ class TupleUI(QMainWindow):
 
         self.account_signout_action = QAction("Sign Out", self)
         self.account_signout_action.triggered.connect(
-            lambda: self.run_command("tuple logout")
+            lambda: self.run_command(CMD_LOGOUT)
         )
         self.account_menu.addAction(self.account_signout_action)
 
         self.account_menu.addSeparator()
         show_native = QAction("Show Native Tuple UI", self)
-        show_native.triggered.connect(lambda: self.run_command("tuple ui"))
+        show_native.triggered.connect(lambda: self.run_command(CMD_NATIVE_UI))
         self.account_menu.addAction(show_native)
 
     def _show_account_menu(self):
@@ -556,27 +560,27 @@ class TupleUI(QMainWindow):
 
     def _on_primary_clicked(self):
         if self.state.in_call:
-            self.run_command("tuple end")
+            self.run_command(CMD_LEAVE_CALL)
         else:
-            self.run_command("tuple new")
+            self.run_command(CMD_NEW_CALL)
 
     def _on_mute_clicked(self):
         if self.state.is_muted:
-            self.run_command("tuple unmute")
+            self.run_command(CMD_UNMUTE)
         else:
-            self.run_command("tuple mute")
+            self.run_command(CMD_MUTE)
 
     def _on_share_clicked(self):
         if self.state.is_sharing:
-            self.run_command("tuple unshare")
+            self.run_command(CMD_UNSHARE)
         else:
-            self.run_command("tuple share")
+            self.run_command(CMD_SHARE)
 
     def _on_daemon_clicked(self):
         if self.state.daemon_running:
-            self.run_command("tuple off")
+            self.run_command(CMD_STOP)
         else:
-            self.run_command("tuple on")
+            self.run_command(CMD_START)
 
     def _on_capture_changed(self, value):
         """User picked a new `capture` mechanism from the in-call combo."""
@@ -612,7 +616,7 @@ class TupleUI(QMainWindow):
             btn = QPushButton(label)
             btn.setToolTip(tooltip)
             btn.setMinimumHeight(26)
-            btn.clicked.connect(lambda checked=False, u=url: self.run_command(f"tuple join {u}"))
+            btn.clicked.connect(lambda checked=False, u=url: self.run_command(join_call_cmd(u)))
             self.rooms_container_layout.addWidget(btn)
 
     def _open_settings(self):
@@ -645,7 +649,7 @@ class TupleUI(QMainWindow):
 
     def _start_signin(self):
         self._awaiting_auth_code = True
-        self.run_command("tuple login")
+        self.run_command(CMD_LOGIN)
         self.rebuild_actions()
 
     def _cancel_signin(self):
@@ -658,8 +662,7 @@ class TupleUI(QMainWindow):
             QMessageBox.warning(self, "Input Required", "Please paste the auth code.")
             return
         self._awaiting_auth_code = False
-        # Basic shell-safety: quote the code
-        self.run_command(f'tuple auth "{code}"')
+        self.run_command(auth_cmd(code))
         # The log file will flip is_logged_in on next tick.
         self.rebuild_actions()
 
@@ -693,18 +696,18 @@ class TupleUI(QMainWindow):
         cmd = (self._pending_command or "").strip()
         if not is_error and cmd:
             text = (output or "").lower()
-            if cmd == "tuple mute" and "unmuted" not in text:
+            if cmd == CMD_MUTE and "unmuted" not in text:
                 self.state.set_mute(True)
-            elif cmd == "tuple unmute":
+            elif cmd == CMD_UNMUTE:
                 self.state.set_mute(False)
-            elif cmd == "tuple share" and "unshared" not in text:
+            elif cmd == CMD_SHARE and "unshared" not in text:
                 self.state.set_share(True)
-            elif cmd == "tuple unshare":
+            elif cmd == CMD_UNSHARE:
                 self.state.set_share(False)
         # If `tuple ui` reports the native UI is already shown, close that
         # existing process and re-invoke — user wants one click to bring it
         # up, whether or not it was already running.
-        if cmd == "tuple ui" and "already shown" in (output or "").lower():
+        if cmd == CMD_NATIVE_UI and "already shown" in (output or "").lower():
             self._close_native_ui_and_retry()
         self._pending_command = None
         # Re-render immediately so mute/share toggle reflects the new state
@@ -734,7 +737,7 @@ class TupleUI(QMainWindow):
 
         if closed:
             # Give the window a moment to tear down before re-invoking.
-            QTimer.singleShot(500, lambda: self.run_command("tuple ui"))
+            QTimer.singleShot(500, lambda: self.run_command(CMD_NATIVE_UI))
         else:
             self._log_output(
                 "Native UI already shown, but couldn't locate the window to "
@@ -838,7 +841,7 @@ class TupleUI(QMainWindow):
         if not url:
             QMessageBox.warning(self, "Input Required", "Please enter a call URL.")
             return
-        self.run_command(f"tuple join {url}")
+        self.run_command(join_call_cmd(url))
 
     def _copy_personal_url(self):
         url = self.personal_url_input.text()
@@ -993,7 +996,7 @@ class TupleUI(QMainWindow):
         self.tray_menu.addAction(self.show_action)
 
         show_native = QAction("Show Native Tuple UI", self)
-        show_native.triggered.connect(lambda: self.run_command("tuple ui"))
+        show_native.triggered.connect(lambda: self.run_command(CMD_NATIVE_UI))
         self.tray_menu.addAction(show_native)
 
         self.tray_menu.addSeparator()
@@ -1013,11 +1016,11 @@ class TupleUI(QMainWindow):
         self.tray_menu.addAction(self.tray_join_call_action)
 
         self.tray_new_call_action = QAction("New Call", self)
-        self.tray_new_call_action.triggered.connect(lambda: self.run_command("tuple new"))
+        self.tray_new_call_action.triggered.connect(lambda: self.run_command(CMD_NEW_CALL))
         self.tray_menu.addAction(self.tray_new_call_action)
 
         self.tray_end_call_action = QAction("Hang Up", self)
-        self.tray_end_call_action.triggered.connect(lambda: self.run_command("tuple end"))
+        self.tray_end_call_action.triggered.connect(lambda: self.run_command(CMD_LEAVE_CALL))
         self.tray_menu.addAction(self.tray_end_call_action)
 
         self.tray_mute_action = QAction("Mute", self)
@@ -1118,7 +1121,7 @@ class TupleUI(QMainWindow):
             sep = self.tray_menu.insertSeparator(self.tray_settings_action)
             for name, url in rooms:
                 a = QAction(name, self)
-                a.triggered.connect(lambda checked=False, u=url: self.run_command(f"tuple join {u}"))
+                a.triggered.connect(lambda checked=False, u=url: self.run_command(join_call_cmd(u)))
                 self.tray_menu.insertAction(self.tray_settings_action, a)
 
     # --------------------------------------------------- Tray interactions
@@ -1146,28 +1149,28 @@ class TupleUI(QMainWindow):
 
     def _tray_toggle_daemon(self):
         if self.state.daemon_running:
-            self.run_command("tuple off")
+            self.run_command(CMD_STOP)
         else:
-            self.run_command("tuple on")
+            self.run_command(CMD_START)
 
     def _tray_toggle_mute(self):
         if self.state.is_muted:
-            self.run_command("tuple unmute")
+            self.run_command(CMD_UNMUTE)
         else:
-            self.run_command("tuple mute")
+            self.run_command(CMD_MUTE)
 
     def _tray_toggle_share(self):
         if self.state.is_sharing:
-            self.run_command("tuple unshare")
+            self.run_command(CMD_UNSHARE)
         else:
-            self.run_command("tuple share")
+            self.run_command(CMD_SHARE)
 
     def _tray_join_call(self):
         url, ok = QInputDialog.getText(
             self, "Join Call", "Enter call URL:", QLineEdit.EchoMode.Normal, "",
         )
         if ok and url.strip():
-            self.run_command(f"tuple join {url.strip()}")
+            self.run_command(join_call_cmd(url.strip()))
 
     # ---------------------------------------------------- Signals & quit
 
