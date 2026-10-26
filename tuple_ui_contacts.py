@@ -1,7 +1,8 @@
-"""Contacts panel — parses `tuple ls`, renders rows with Call + favorite toggle."""
+"""Contacts panel — reads `tuple contacts list`, renders rows with Call + favorite toggle."""
 
+import json
 import random
-import re
+import shlex
 import subprocess
 
 from PyQt6.QtCore import Qt
@@ -10,102 +11,61 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from tuple_ui_core import start_call_cmd
 from tuple_ui_theme import SUCCESS, TEXT_MUTED, TEXT_SUBTLE, WARN
 
-# Example line from `tuple ls`:
-#   123 Jane Doe <jane@example.com> [unavailable] (favorite)
-CONTACT_RE = re.compile(
-    r"^\s*(?P<id>\d+)\s+(?P<name>.+?)\s+<(?P<email>[^>]+)>\s+\[(?P<status>\w+)\]"
-    r"(?P<fav>\s+\(favorite\))?\s*$"
-)
-
-# Example line from `tuple call` (the numbered favorites list the CLI prints
-# before prompting for a number):
-#     1) John Smith <john.smith@example.com>
-CALL_ITEM_RE = re.compile(
-    r"^\s*(?P<num>\d+)\)\s+(?P<name>.+?)\s+<(?P<email>[^>]+)>\s*$"
-)
-
 STATUS_COLOR = {
-    "available": SUCCESS,
-    "unavailable": WARN,
+    "online": SUCCESS,
+    "busy": WARN,
     "offline": TEXT_SUBTLE,
 }
 
 
 def parse_contacts(text):
-    """Parse `tuple ls` output into list of dicts."""
-    contacts = []
-    for line in text.splitlines():
-        m = CONTACT_RE.match(line)
-        if not m:
-            continue
-        contacts.append({
-            "id": m.group("id"),
-            "name": m.group("name").strip(),
-            "email": m.group("email"),
-            "status": m.group("status"),
-            "favorite": bool(m.group("fav")),
-            "call_number": None,  # filled in from parse_call_list()
-        })
-    return contacts
+    """Parse `tuple contacts list --format json` output into list of dicts.
 
-
-def parse_call_list(text):
-    """Parse the numbered favorites list printed by `tuple call`.
-
-    Returns a dict mapping lowercased email → call number (int).
+    Example entry:
+      {"id": 123, "email": "jane@example.com", "full_name": "Jane Doe",
+       "short_name": "Jane", "kind": "teammate", "favorited": true,
+       "recent": true, "status": "online"}
     """
-    mapping = {}
-    for line in text.splitlines():
-        m = CALL_ITEM_RE.match(line)
-        if not m:
-            continue
-        mapping[m.group("email").lower()] = int(m.group("num"))
-    return mapping
+    return [
+        {
+            "id": str(c["id"]),
+            "name": c.get("full_name") or c.get("short_name") or c["email"],
+            "email": c["email"],
+            "status": c.get("status") or "unknown",
+            "favorite": bool(c.get("favorited")),
+        }
+        for c in json.loads(text)
+    ]
 
 
 def fetch_contacts():
-    """Run `tuple ls` and return (contacts, error_or_none)."""
+    """Run `tuple contacts list` and return (contacts, error_or_none)."""
     try:
         result = subprocess.run(
-            ["tuple", "ls"], capture_output=True, text=True, timeout=10,
+            ["tuple", "contacts", "list", "--format", "json"],
+            capture_output=True, text=True, timeout=10,
         )
     except FileNotFoundError:
         return [], "`tuple` CLI not found on PATH"
     except subprocess.TimeoutExpired:
-        return [], "Timed out calling `tuple ls`"
+        return [], "Timed out calling `tuple contacts list`"
     except Exception as e:  # pragma: no cover
         return [], f"Error: {e}"
 
     if result.returncode != 0:
         return [], (result.stderr or result.stdout or "unknown error").strip()
-    return parse_contacts(result.stdout), None
-
-
-def fetch_call_numbers():
-    """Run `tuple call` to read the numbered favorites list, then abort.
-
-    The CLI prints the list to stdout and then blocks on `enter a number to
-    call:`. We feed a single newline so the prompt gets an empty answer,
-    which aborts the call without dialing anyone. Returns dict of
-    lowercase-email → number (empty dict on any failure — calling is
-    non-critical).
-    """
     try:
-        result = subprocess.run(
-            ["tuple", "call"],
-            capture_output=True, text=True, timeout=5,
-            input="\n",
-        )
-    except Exception:
-        return {}
-    return parse_call_list((result.stdout or "") + (result.stderr or ""))
+        return parse_contacts(result.stdout), None
+    except (ValueError, KeyError, TypeError) as e:
+        return [], f"Unexpected `tuple contacts list` output: {e}"
 
 
 def sort_contacts(contacts):
-    """Favorites first, then available > unavailable > offline, then by name."""
-    status_rank = {"available": 0, "unavailable": 1, "offline": 2}
+    """Favorites first, then online > busy > offline, then by name."""
+    status_rank = {"online": 0, "busy": 1, "offline": 2}
     return sorted(
         contacts,
         key=lambda c: (
@@ -157,37 +117,26 @@ class ContactRow(QFrame):
         star.clicked.connect(self._toggle_favorite)
         layout.addWidget(star)
 
-        # Call button — `tuple call` only accepts a 1-based index into its
-        # own numbered list, and that list only contains *available*
-        # favorites. Three cases for the disabled state:
-        #   - available favorite: button enabled, dials via piped index
-        #   - favorite but unavailable/offline: disabled, explain status
-        #   - not a favorite: disabled, suggest favoriting
+        # Call button — `tuple call start` blocks until the callee answers,
+        # so run it in the background to keep the UI's command slot free.
         call = QPushButton("Call")
         call.setFixedWidth(60)
-        call_number = self.contact.get("call_number")
-        if call_number is not None:
-            call.setToolTip(f"Call {self.contact['name']} (tuple favorite #{call_number})")
-            call.clicked.connect(
-                lambda: self._run_command(f"echo {call_number} | tuple call")
-            )
-        else:
+        if self.contact["status"] == "offline":
             call.setEnabled(False)
-            if self.contact["favorite"]:
-                call.setToolTip(
-                    f"{self.contact['name']} is {self.contact['status']} — "
-                    "Tuple only lists available favorites as callable."
+            call.setToolTip(f"{self.contact['name']} is offline")
+        else:
+            call.setToolTip(f"Call {self.contact['name']}")
+            call.clicked.connect(
+                lambda: self._run_command(
+                    f"{start_call_cmd(self.contact['email'])} >/dev/null 2>&1 &"
                 )
-            else:
-                call.setToolTip(
-                    "Only favorites can be dialed from here — the `tuple call` "
-                    "CLI only knows how to call favorites. Click ☆ to favorite."
-                )
+            )
         layout.addWidget(call)
 
     def _toggle_favorite(self):
         cmd = "unfavorite" if self.contact["favorite"] else "favorite"
-        self._run_command(f"tuple {cmd} {self.contact['id']}")
+        # The CLI resolves people by name/email, not by numeric id.
+        self._run_command(f"tuple contacts {cmd} {shlex.quote(self.contact['email'])}")
         # Optimistic toggle — panel will refresh when parent pokes us.
         self._on_favorite_toggled(self.contact["id"])
 
@@ -227,11 +176,11 @@ class ContactsPanel(QWidget):
         if not roster:
             self.status_label.setText("No contacts loaded")
             return
-        available = sum(1 for c in roster if c["status"] == "available")
+        online = sum(1 for c in roster if c["status"] == "online")
         favs = sum(1 for c in roster if c["favorite"])
         suffix = " · demo mode" if self._demo_mode else ""
         self.status_label.setText(
-            f"{len(roster)} contacts · {favs} favorites · {available} available{suffix}"
+            f"{len(roster)} contacts · {favs} favorites · {online} online{suffix}"
         )
 
     def _displayed_contacts(self):
@@ -239,27 +188,19 @@ class ContactsPanel(QWidget):
 
     @staticmethod
     def _generate_fake_contacts(count):
-        """Build a plausible-looking fake roster: mix of statuses, a handful of
-        favorites up top, call numbers only for available favorites."""
-        statuses = ["available", "available", "unavailable", "offline"]
+        """Build a plausible-looking fake roster: mix of statuses and a handful
+        of favorites up top."""
+        statuses = ["online", "online", "busy", "offline"]
         fav_count = max(3, count // 5)
         contacts = []
-        call_num = 0
         for i in range(count):
             n = i + 1
-            status = statuses[i % len(statuses)]
-            is_fav = i < fav_count
-            call_number = None
-            if is_fav and status == "available":
-                call_num += 1
-                call_number = call_num
             contacts.append({
                 "id": str(9000 + n),
                 "name": f"Person {n}",
                 "email": f"person{n}@example.com",
-                "status": status,
-                "favorite": is_fav,
-                "call_number": call_number,
+                "status": statuses[i % len(statuses)],
+                "favorite": i < fav_count,
             })
         return sort_contacts(contacts)
 
@@ -303,11 +244,6 @@ class ContactsPanel(QWidget):
             if error:
                 self.status_label.setText(f"Error: {error}")
                 return
-            # Join by email to attach `tuple call` favorite numbers — emails
-            # are more stable than names (Cyrillic/whitespace/etc.).
-            call_numbers = fetch_call_numbers()
-            for c in contacts:
-                c["call_number"] = call_numbers.get(c["email"].lower())
             self._contacts = sort_contacts(contacts)
             self._rebuild_rows()
             self._update_status_label()
