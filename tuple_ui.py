@@ -29,6 +29,8 @@ from tuple_ui_theme import (
 )
 
 LOCK_FILE_PATH = Path.home() / ".cache" / "tuple-ui.lock"
+# Keep in sync with the toggle-tuple-mute helper script.
+TOGGLE_MUTE_SIGNAL = signal.SIGRTMIN + 1
 
 
 def load_tuple_icon(size=48):
@@ -1179,6 +1181,9 @@ class TupleUI(QMainWindow):
         signal.signal(signal.SIGUSR1, self._on_sigusr1)
         # New: SIGUSR2 = show/raise window (used by second-instance launcher)
         signal.signal(signal.SIGUSR2, self._on_sigusr2)
+        # SIGRTMIN+1 = toggle mute (used by toggle-tuple-mute; the CLI has
+        # no way to query mute state, so the UI's tracked state is the truth)
+        signal.signal(TOGGLE_MUTE_SIGNAL, self._on_toggle_mute_signal)
         # SIGINT / SIGTERM: clean quit
         signal.signal(signal.SIGINT, self._on_termination_signal)
         signal.signal(signal.SIGTERM, self._on_termination_signal)
@@ -1192,6 +1197,9 @@ class TupleUI(QMainWindow):
 
     def _on_sigusr2(self, signum, frame):
         QTimer.singleShot(0, self._raise_to_foreground)
+
+    def _on_toggle_mute_signal(self, signum, frame):
+        QTimer.singleShot(0, self._tray_toggle_mute)
 
     def _raise_to_foreground(self):
         self.show()
