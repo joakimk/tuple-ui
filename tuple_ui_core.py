@@ -52,7 +52,7 @@ class TupleState:
         self.is_muted = False
         self.is_sharing = False
         # User-intent overrides: set by the UI via set_mute/set_share after a
-        # successful `tuple mute`/`tuple unmute`/`tuple share`/`tuple unshare`
+        # successful `tuple call mute`/`unmute`/`tuple share`/`tuple unshare`
         # command. These survive log re-parsing because recent Tuple CLI
         # versions don't always log `cli: mute`/`cli: unmute` entries, so the
         # log walk alone can't tell us the current mute state.

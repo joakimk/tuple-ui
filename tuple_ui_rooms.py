@@ -1,4 +1,4 @@
-"""Rooms: persisted shortcut buttons for `tuple join <URL>` calls.
+"""Rooms: persisted shortcut buttons for `tuple call join <URL>` calls.
 
 Only the config model lives here now — the add/remove UI moved into the
 Settings dialog (see `tuple_ui_settings.SettingsDialog`).

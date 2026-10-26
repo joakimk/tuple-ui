@@ -113,7 +113,7 @@ class SettingsDialog(QDialog):
             prefs_layout.addWidget(self.show_on_start_cb)
             layout.addWidget(prefs_group)
 
-        # --- Rooms (shortcuts for `tuple join <URL>`) ---
+        # --- Rooms (shortcuts for `tuple call join <URL>`) ---
         if self.button_config is not None:
             rooms_group = QGroupBox("Rooms")
             rooms_outer = QVBoxLayout(rooms_group)

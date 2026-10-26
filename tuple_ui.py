@@ -690,7 +690,7 @@ class TupleUI(QMainWindow):
         # Track mute/share state from the CLI's own response. The log file
         # only records CLI invocations and the daemon has no query command,
         # so parsing the command output is the best confirmation we get.
-        # After `tuple mute` the CLI prints a confirmation containing
+        # After `tuple call mute` the CLI prints a confirmation containing
         # "muted" (e.g. "muted your microphone"); likewise "unmuted",
         # "shared", "unshared". Belt-and-braces: also trust the command we
         # just dispatched (optimistic) since the daemon errors loudly on
@@ -721,7 +721,7 @@ class TupleUI(QMainWindow):
     def _close_native_ui_and_retry(self):
         """Close Tuple's native UI window, then re-invoke `tuple ui`.
 
-        The native UI window is owned by the `tuple on` daemon process
+        The native UI window is owned by the `tuple start` daemon process
         itself — there is no separate `tuple ui` process to SIGTERM (I
         verified by running `tuple ui` and watching the process list —
         only the daemon appears). So we close the window via the session's
