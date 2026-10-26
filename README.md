@@ -1,3 +1,7 @@
+# Legacy
+
+This is being replaced with https://github.com/joakimk/tuple-linux-ui that is based on the Mac/Windows client UI.
+
 # Tuple UI
 
 This is made using Claude with very little manual editing.
